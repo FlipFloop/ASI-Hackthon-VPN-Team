@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NAS Traffic &amp; Weather Viz</title>
+    <link
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/deck.gl@9.0.36/dist.min.js"></script>
+    <link href="style.css" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div id="rightdock">
+      <div id="rd-tabs">
+        <button data-tab="sectors" class="active">Sectors</button>
+        <button data-tab="conflicts">In weather</button>
+        <button id="rd-collapse" title="collapse">–</button>
+      </div>
+      <div id="rd-conflicts" class="rd-panel hidden"></div>
+      <div id="rd-sectors" class="rd-panel"></div>
+    </div>
+
+    <div id="panel">
+      <h1>NAS Traffic &amp; Weather</h1>
+
+      <label class="row">
+        <span>Snapshot</span>
+        <select id="snapshot"></select>
+      </label>
+
+      <div id="meta" class="meta"></div>
+
+      <div class="layers">
+        <label><input type="checkbox" id="ly-flights" checked /> Flights</label>
+        <label
+          ><input type="checkbox" id="ly-refc" checked /> Reflectivity
+          (refc)</label
+        >
+        <label><input type="checkbox" id="ly-retop" /> Echo top (retop)</label>
+        <label
+          ><input type="checkbox" id="ly-conflicts-only" /> Conflicts
+          only</label
+        >
+        <label
+          ><input type="checkbox" id="ly-arrows" /> Direction arrows</label
+        >
+        <label
+          ><input type="checkbox" id="ly-motion-trails" /> Plane trails</label
+        >
+        <label
+          ><input type="checkbox" id="ly-trails" /> Show route of hovered</label
+        >
+      </div>
+
+      <label class="row">
+        <span>Airports</span>
+        <select id="airport-mode">
+          <option value="off" selected>Off</option>
+          <option value="hubs">Major hubs</option>
+          <option value="active">Active now</option>
+        </select>
+      </label>
+
+      <label class="row">
+        <span>Sectors</span>
+        <select id="sector-band">
+          <option value="off" selected>Off</option>
+          <option value="LOW">LOW band (&lt;35k)</option>
+          <option value="HIGH">HIGH band (&ge;35k)</option>
+        </select>
+      </label>
+
+      <label class="row">
+        <span>Scenario</span>
+        <select id="scenario">
+          <option value="baseline" selected>Baseline</option>
+          <option value="gdp">GDP (ground delays)</option>
+        </select>
+      </label>
+
+      <div class="row nfz-row">
+        <button id="nfz-draw" class="panel-btn">Draw no-fly zone</button>
+        <button id="nfz-clear" class="panel-btn nfz-clear">Clear</button>
+      </div>
+
+      <label class="row slider">
+        <span>Weather opacity</span>
+        <input type="range" id="wx-opacity" min="0" max="100" value="70" />
+      </label>
+
+      <div class="legend">
+        <div>
+          <span class="dot conflict"></span> in impassable weather (&ge;40 dBZ
+          at/above alt)
+        </div>
+        <div><span class="dot high"></span> HIGH band (&ge;35k ft)</div>
+        <div><span class="dot low"></span> LOW band (&lt;35k ft)</div>
+        <div class="sec-legend">
+          sectors: <span class="swatch s-ok"></span> ok
+          <span class="swatch s-warn"></span> near
+          <span class="swatch s-over"></span> over capacity
+        </div>
+      </div>
+    </div>
+
+    <div id="timebar">
+      <button id="play">▶</button>
+      <input type="range" id="time" min="0" max="1000" value="0" />
+      <span id="clock" class="clock">—</span>
+      <label class="speed">
+        speed
+        <select id="speed">
+          <option value="60">1m/s</option>
+          <option value="300">5m/s</option>
+          <option value="900" selected>15m/s</option>
+          <option value="1800">30m/s</option>
+          <option value="3600">60m/s</option>
+        </select>
+      </label>
+      <span id="stats" class="stats"></span>
+      <button id="share" class="share-btn">Share frame</button>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+# Python virtualenv
+.venv/
+__pycache__/
+*.py[cod]
+
+# Provided data bundle (large; supplied externally)
+hackathon_data_bundle/
+
+# Generated web assets (reproducible via viz/preprocess*.py)
+viz/public/data/
+
+# macOS
+.DS_Store
+
+# Editor / Claude local
+.claude/
