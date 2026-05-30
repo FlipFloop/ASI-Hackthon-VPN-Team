@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Hold-Cost Engine — FAA merit-order delay allocation</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root{
+    --bg:#0c1118; --panel:#141b26; --panel2:#1b2533; --line:#26384d;
+    --ink:#e7eef6; --dim:#8aa0b8; --accent:#39d98a; --warn:#ffb454;
+    --air:#ff8c42; --gate:#4aa3ff; --ontime:#39d98a; --div:#ff5470;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;flex-wrap:wrap;
+    background:linear-gradient(180deg,#101826,#0c1118);border-bottom:1px solid var(--line)}
+  header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .tag{color:var(--dim);font-size:12px}
+  header select{background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:7px;padding:6px 10px;font-size:13px}
+  .fuelchip{display:flex;align-items:center;gap:8px;margin-left:auto;
+    background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:6px 11px}
+  .fuelchip .px{font-weight:700;font-variant-numeric:tabular-nums}
+  .live{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 0 rgba(57,217,138,.6);animation:pulse 2s infinite}
+  .live.off{background:var(--dim);animation:none}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(57,217,138,.5)}70%{box-shadow:0 0 0 7px rgba(57,217,138,0)}100%{box-shadow:0 0 0 0 rgba(57,217,138,0)}}
+  .wrap{display:grid;grid-template-columns:1.55fr 1fr;gap:14px;padding:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  #map{height:560px;width:100%}
+  .pad{padding:14px}
+  .hl{display:flex;flex-direction:column;gap:4px;padding:16px 18px;
+    background:radial-gradient(120% 120% at 0% 0%,#13351f,#141b26);border:1px solid #1f5235}
+  .hl .big{font-size:34px;font-weight:750;color:var(--accent);line-height:1.05}
+  .hl .sub{color:var(--ink);font-size:13px}
+  .hl .vs{color:var(--dim);font-size:12px;margin-top:4px}
+  .ctl{display:grid;grid-template-columns:auto 1fr auto;gap:10px 12px;align-items:center}
+  .ctl label{color:var(--dim);font-size:12.5px;white-space:nowrap}
+  .ctl output{font-variant-numeric:tabular-nums;font-weight:650;text-align:right;min-width:74px}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  h3{margin:0 0 10px;font-size:12px;letter-spacing:.8px;text-transform:uppercase;color:var(--dim)}
+  .bars{display:flex;flex-direction:column;gap:9px}
+  .bar{display:grid;grid-template-columns:128px 1fr auto;gap:10px;align-items:center}
+  .bar .nm{font-size:11.5px;color:var(--dim)}
+  .bar .nm small{display:block;color:#5f7080;font-size:10px}
+  .track{height:18px;background:var(--panel2);border-radius:5px;overflow:hidden;position:relative}
+  .fill{height:100%;border-radius:5px;transition:width .25s}
+  .bar .amt{font-variant-numeric:tabular-nums;font-size:12.5px;min-width:92px;text-align:right}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 11px}
+  .stat b{display:block;font-size:18px;font-variant-numeric:tabular-nums}
+  .stat span{color:var(--dim);font-size:11px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:6px 9px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--dim);font-weight:600;cursor:pointer;position:sticky;top:0;background:var(--panel)}
+  th:first-child,td:first-child{text-align:left}
+  .tblwrap{max-height:340px;overflow:auto}
+  .pill{padding:1px 8px;border-radius:20px;font-size:11px;font-weight:650}
+  .p-gate{background:#10314f;color:var(--gate)} .p-air{background:#3a2410;color:var(--air)}
+  .p-ontime{background:#103021;color:var(--ontime)} .p-div{background:#3a1018;color:var(--div)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:12px;padding:10px 14px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  .muted{color:var(--dim);font-size:12px}
+  a{color:var(--accent)}
+  .loading{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    background:rgba(12,17,24,.55);z-index:500;color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Hold-Cost Engine</h1>
+  <span class="tag">FAA Ground Delay Program · merit-order via CDM slot substitution · live fuel $ + CO₂</span>
+  <label class="tag">Hub</label><select id="hub"></select>
+  <label class="tag">Airline</label><select id="airline"></select>
+  <span class="fuelchip">
+    <span class="live" id="fuelLive"></span>
+    <span>Jet&nbsp;fuel <span class="px" id="fuelPx">—</span></span>
+    <span class="tag" id="fuelSrc"></span>
+  </span>
+</header>
+
+<div class="wrap">
+  <div class="card" style="position:relative">
+    <div id="map"></div>
+    <div class="loading" id="maploading">recomputing GDP…</div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--ontime)"></span>on-time</span>
+      <span><span class="dot" style="background:var(--air)"></span>air-hold (burning $)</span>
+      <span><span class="dot" style="background:var(--div)"></span>diversion risk</span>
+      <span><span class="dot" style="background:var(--gate)"></span>gate-hold (≈free) — grounded, see board</span>
+      <span><span class="dot" style="background:#b03030"></span>storm ≥40 dBZ (cuts acceptance rate)</span>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div class="card hl">
+      <div class="sub" id="hlTitle">CDM intra-airline substitution vs. FAA Ration-by-Schedule</div>
+      <div class="big" id="savUsd">—</div>
+      <div class="sub" id="savCo2">—</div>
+      <div class="vs" id="savVsAir">—</div>
+    </div>
+
+    <div class="card pad">
+      <h3>Live levers</h3>
+      <div class="ctl">
+        <label>Fuel price</label>
+        <input type="range" id="fuel" min="1.2" max="6" step="0.01" value="2.50"/>
+        <output id="fuelOut">$2.50/gal</output>
+        <label>Acceptance rate</label>
+        <input type="range" id="aar" min="20" max="90" step="1" value="55"/>
+        <output id="aarOut">55/hr</output>
+        <label>Weather severity</label>
+        <input type="range" id="sev" min="0" max="2" step="0.1" value="1.0"/>
+        <output id="sevOut">×1.0</output>
+      </div>
+      <div class="muted" style="margin-top:8px">Fuel &amp; airline re-price instantly (client-side); acceptance rate &amp; weather re-run the Ground Delay Program on the server. <a href="#" id="useLive">use live price</a></div>
+    </div>
+
+    <div class="card pad">
+      <h3>Cost by allocation policy — same flights, same total delay</h3>
+      <div class="bars" id="bars"></div>
+      <div class="stats" id="stats"></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap" style="grid-template-columns:1fr;padding-top:0">
+  <div class="card">
+    <div class="pad" style="display:flex;justify-content:space-between;align-items:center">
+      <h3 style="margin:0">Contended arrivals — Ration-by-Schedule vs. cost-optimal substitution</h3>
+      <span class="muted" id="boardnote"></span>
+    </div>
+    <div class="tblwrap">
+      <table id="board">
+        <thead><tr>
+          <th data-k="fn">Flight</th><th data-k="airline">Airline</th><th data-k="orig">From</th>
+          <th data-k="airborne">Status</th><th data-k="spd">Cruise kt</th>
+          <th data-k="burn_kghr">Burn kg/hr</th><th data-k="eta_min">ETA min</th>
+          <th data-k="rbs_delay_min">RBS delay</th>
+          <th data-k="sub_delay_min">Substituted</th>
+          <th data-k="sub_where">Absorbs</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const KG_PER_GAL=3.04, CO2_PER_KG=3.16;
+let EV=null, FUEL=null, sortK="rbs_delay_min", sortDir=-1, AIRLINE="ALL";
+
+const map=L.map('map',{zoomControl:true,attributionControl:false}).setView([37,-95],4);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:10}).addTo(map);
+let layer=L.layerGroup().addTo(map);
+
+const $=id=>document.getElementById(id);
+const fmt=n=>'$'+Math.round(n).toLocaleString();
+const getC=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const usd=(kg,f)=>kg*f/KG_PER_GAL;
+
+// rows for the currently selected airline (or all)
+function rows(){return AIRLINE==="ALL"?EV.flights:EV.flights.filter(f=>f.airline===AIRLINE);}
+function sumKg(policy){return rows().reduce((s,f)=>s+f.fuel_kg[policy],0);}
+
+async function loadFuel(){
+  try{FUEL=await(await fetch('/api/fuel')).json();}catch(e){FUEL={usd_per_gal:2.5,source:'offline',live:false,as_of:'—'};}
+  $('fuelPx').textContent='$'+FUEL.usd_per_gal.toFixed(2)+'/gal';
+  $('fuelSrc').textContent=FUEL.source+(FUEL.as_of&&FUEL.as_of!=='—'?' · '+FUEL.as_of:'');
+  $('fuelLive').className='live'+(FUEL.live?'':' off');
+  setFuel(FUEL.usd_per_gal);
+}
+function setFuel(v){$('fuel').value=v; $('fuelOut').textContent='$'+(+v).toFixed(2)+'/gal'; if(EV)render();}
+
+async function loadHubs(){
+  const r=await(await fetch('/api/hubs')).json();
+  $('hub').innerHTML=r.hubs.map(h=>`<option>${h}</option>`).join('');
+}
+async function fetchEvent(){
+  $('maploading').style.display='flex';
+  const r=await fetch(`/api/event?hub=${$('hub').value}&aar=${$('aar').value}&sev=${$('sev').value}&fuel=${$('fuel').value}`);
+  EV=await r.json();
+  $('maploading').style.display='none';
+  // (re)build airline dropdown from this event
+  const cur=AIRLINE;
+  const opts=['<option value="ALL">All airlines</option>'].concat(
+    Object.entries(EV.by_airline).map(([c,v])=>`<option value="${c}">${v.name} (${c}) · ${v.n}</option>`));
+  $('airline').innerHTML=opts.join('');
+  if([...$('airline').options].some(o=>o.value===cur)) $('airline').value=cur; else {AIRLINE="ALL";$('airline').value="ALL";}
+  render();
+}
+
+function render(){
+  const f=parseFloat($('fuel').value);
+  const kg={all_air:sumKg('all_air'),rbs:sumKg('rbs'),intra_sub:sumKg('intra_sub'),sysopt:sumKg('sysopt')};
+  const cost={}; for(const k in kg) cost[k]=usd(kg[k],f);
+  const sav=cost.rbs-cost.intra_sub;
+  const co2sav=(kg.rbs-kg.intra_sub)*CO2_PER_KG/1000;
+  const ceil=cost.rbs-cost.sysopt;
+  const who=AIRLINE==="ALL"?"the whole arrival bank":`${EV.by_airline[AIRLINE]?.name||AIRLINE}`;
+
+  $('hlTitle').textContent=AIRLINE==="ALL"
+    ? "CDM intra-airline substitution vs. FAA Ration-by-Schedule (all carriers)"
+    : `${who}: cost-optimal slot substitution vs. its RBS slots`;
+  $('savUsd').textContent=fmt(sav);
+  $('savCo2').textContent=`+ ${co2sav.toFixed(1)} t CO₂ avoided · ${who} · ${EV.hub} GDP, FAA-legal today`;
+  $('savVsAir').textContent=`vs. "everyone loiters in the air": ${fmt(cost.all_air-cost.intra_sub)} · `
+    +`cross-airline ceiling (not FAA-legal): ${fmt(ceil)} · ${rows().length} flights shown`;
+
+  const defs=[
+    ['all_air','All-air','status quo: loiter',  'var(--air)'],
+    ['rbs','RBS','FAA today (equity)',          'var(--warn)'],
+    ['intra_sub','CDM substitution','legal & deployable','var(--accent)'],
+    ['sysopt','System-optimal','cross-airline ceiling','#6f7d8c'],
+  ];
+  const mx=Math.max(cost.all_air,1);
+  $('bars').innerHTML=defs.map(([k,nm,small,col])=>`
+    <div class="bar"><span class="nm">${nm}<small style="color:#5f7080">${small}</small></span>
+    <div class="track"><div class="fill" style="width:${100*cost[k]/mx}%;background:${col}"></div></div>
+    <span class="amt">${fmt(cost[k])}</span></div>`).join('');
+
+  // stats (airline-aware where meaningful)
+  const rs=rows();
+  const airAir=rs.filter(f=>f.airborne&&f.rbs_delay_min>0.1).length;
+  const divR=rs.filter(f=>f.rbs_diversion).length, divS=rs.filter(f=>f.sub_diversion).length;
+  const gateMin=rs.filter(f=>!f.airborne).reduce((s,f)=>s+f.sub_delay_min,0);
+  $('stats').innerHTML=`
+    <div class="stat"><b>${EV.min_aar}–${EV.max_aar}</b><span>acceptance rate /hr (storm-cut)</span></div>
+    <div class="stat"><b>${divR} → ${divS}</b><span>diversion-risk flights (RBS → substitution)</span></div>
+    <div class="stat"><b>${Math.round(gateMin).toLocaleString()} min</b><span>delay moved to the gate (≈$0 fuel)</span></div>
+    <div class="stat"><b>${rs.length}</b><span>flights ${AIRLINE==="ALL"?'into '+EV.hub:'· '+AIRLINE}</span></div>`;
+
+  drawMap(); drawBoard();
+}
+
+function colorFor(f){
+  if(f.sub_diversion) return getC('--div');
+  if(f.sub_where==='air') return getC('--air');
+  if(f.sub_where==='gate') return getC('--gate');
+  return getC('--ontime');
+}
+function drawMap(){
+  layer.clearLayers();
+  EV.storm_cells.forEach(([la,lo,db])=>{
+    L.rectangle([[la-0.07,lo-0.09],[la+0.07,lo+0.09]],
+      {stroke:false,fillColor:db>=40?'#d23b3b':'#7a4a1f',fillOpacity:Math.min(.5,(db-25)/70)}).addTo(layer);
+  });
+  L.circleMarker([EV.lat,EV.lon],{radius:7,color:'#fff',weight:2,fillColor:'#39d98a',fillOpacity:1})
+    .bindTooltip(`<b>${EV.hub}</b> — acceptance ${EV.min_aar}–${EV.max_aar}/hr`).addTo(layer);
+  L.circle([EV.lat,EV.lon],{radius:150000,color:'#39d98a',weight:1,opacity:.35,fill:false}).addTo(layer);
+  const pts=[];
+  rows().filter(f=>f.lat!=null).forEach(f=>{
+    pts.push([f.lat,f.lon]);
+    L.circleMarker([f.lat,f.lon],{radius:4.5,weight:1,color:'#0c1118',fillColor:colorFor(f),fillOpacity:.95})
+     .bindTooltip(`<b>${f.fn}</b> ${f.airline_name} · ${f.orig}→${EV.hub}<br>${f.spd}kt · ${Math.round(f.burn_kghr)}kg/hr`
+       +`<br>RBS ${f.rbs_delay_min}m → substituted ${f.sub_delay_min}m (${f.sub_where})`
+       +(f.sub_diversion?'<br><b style="color:#ff5470">DIVERSION RISK</b>':''),{sticky:true}).addTo(layer);
+  });
+  if(pts.length) map.fitBounds(L.latLngBounds(pts.concat([[EV.lat,EV.lon]])).pad(0.25));
+  else map.setView([EV.lat,EV.lon],6);
+}
+function drawBoard(){
+  const tb=$('board').querySelector('tbody');
+  const rs=[...rows()].sort((a,b)=>{
+    let x=a[sortK],y=b[sortK];
+    if(typeof x==='boolean'){x=x?1:0;y=y?1:0;}
+    if(typeof x==='string') return sortDir*x.localeCompare(y);
+    return sortDir*(x-y);
+  });
+  const pill={gate:'p-gate',air:'p-air','on-time':'p-ontime'};
+  tb.innerHTML=rs.slice(0,300).map(f=>{
+    const cls=f.sub_diversion?'p-div':pill[f.sub_where];
+    const w=f.sub_diversion?'air ⚠':f.sub_where;
+    return `<tr>
+      <td>${f.fn}</td><td>${f.airline}</td><td>${f.orig}</td>
+      <td>${f.airborne?'airborne':'gate'}</td>
+      <td>${f.spd}</td><td>${Math.round(f.burn_kghr)}</td><td>${f.eta_min}</td>
+      <td style="color:var(--dim)">${f.rbs_delay_min}</td>
+      <td>${f.sub_delay_min}</td>
+      <td><span class="pill ${cls}">${w}</span></td></tr>`;}).join('');
+  $('boardnote').textContent=`${rows().length} flights · grounded → gate (≈$0 fuel) · airborne prioritized for on-time slots`;
+}
+
+document.querySelectorAll('#board th').forEach(th=>th.onclick=()=>{
+  const k=th.dataset.k; sortDir=(k===sortK)?-sortDir:-1; sortK=k; drawBoard();
+});
+$('fuel').oninput=()=>{$('fuelOut').textContent='$'+(+$('fuel').value).toFixed(2)+'/gal'; if(EV)render();};
+$('aar').oninput=()=>$('aarOut').textContent=$('aar').value+'/hr';
+$('sev').oninput=()=>$('sevOut').textContent='×'+(+$('sev').value).toFixed(1);
+$('aar').onchange=fetchEvent; $('sev').onchange=fetchEvent; $('hub').onchange=fetchEvent;
+$('airline').onchange=()=>{AIRLINE=$('airline').value; render();};
+$('useLive').onclick=e=>{e.preventDefault(); if(FUEL)setFuel(FUEL.usd_per_gal);};
+
+(async()=>{await loadHubs(); await loadFuel(); await fetchEvent();})();
+</script>
+</body>
+</html>
