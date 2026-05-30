@@ -67,15 +67,19 @@ const state = {
     horizon: 0, // forecast preview, minutes ahead (0 | 30 | 60 | 90)
     stormCap: true, // weather cuts sector capacity (storm-reduced capacity)
     wxAffected: false, // highlight every flight whose route crosses a storm
+    wxPlan: false, // proactively reroute weather-affected flights around storms
   },
   stormcap: null, // { HIGH:{name:[red/step]}, LOW:{...} } — capacity reduction
+  stormBoxes: null, // per-strip storm keep-out boxes [[w,s,e,n],...] for rerouting
   wxImpact: null, // per-snapshot weather impact tally (affected flights, minutes)
+  wxPlanStats: null, // result of "plan around weather" (rerouted/held + cost)
   trips: null, // static TripsLayer data for current snapshot
   dock: "sectors", // active tab: "conflicts" | "sectors" (dock is always present)
   dockCollapsed: false,
   dockBand: "LOW", // which band the sectors panel lists
   dockSort: "demand", // "demand" | "load" | "cap" | "name"
   selected: null, // clicked flight — drives the spotlight/fade
+  selectedAirport: null, // clicked airport ICAO — spotlights its flights + ghosts
   focused: null, // flight being located
   focusedSector: null, // sector feature being located
   conflictPts: [], // current in-weather flights (for the dock list)
@@ -451,7 +455,9 @@ function stormRed(band, name, step) {
 function effCap(band, name, step) {
   const cap = state.capByName[name] || 0;
   const red = stormRed(band, name, step);
-  return red > 0 ? Math.max(0, Math.round(cap * (1 - red))) : cap;
+  // floor a storm-reduced sector at 1 (a full storm ~closes it, but show "/1"
+  // not "/0" — clearer, and keeps the demand/capacity ratio finite)
+  return red > 0 ? Math.max(1, Math.round(cap * (1 - red))) : cap;
 }
 
 // green -> yellow -> orange -> red as demand approaches/exceeds capacity
@@ -492,6 +498,19 @@ function updateMeta() {
         ? `<br><b>${stormSecs}</b> sectors lose capacity to storms`
         : "") +
       `</div>`;
+  }
+  // "plan around weather" outcome (what the foreseeing flights would do)
+  const wp = state.wxPlanStats;
+  if (wp) {
+    const nn = (x) => x.toLocaleString("en-US");
+    html +=
+      `<div class="wxplan-box"><b>Plan around weather</b><br>` +
+      `of <b>${wp.affected}</b> weather-affected:<br>` +
+      `<b>${wp.rerouted}</b> reroute · <b>${wp.held}</b> hold · ${wp.minor} no action<br>` +
+      `+${nn(wp.extraNm)} nm · +${wp.delayMin} min reroute<br>` +
+      `<span class="nfz-cost">+$${nn(wp.extraFuelUsd)} fuel · ${nn(wp.extraCo2Kg)} kg CO₂</span>` +
+      `<span class="ghost-note"> @ $${wp.fuelUsdGal.toFixed(2)}/gal</span><br>` +
+      `<span class="ghost-note">“no action” = storm too small/scattered to map as a keep-out</span></div>`;
   }
   if (state.opts.scenario === "gdp" && state.gdp) {
     const g = state.gdp;
@@ -684,6 +703,7 @@ async function loadSnapshot(i) {
   state.nfzDemand = null;
   state.baselineDemandJS = null; // routes differ per snapshot
   state.focusedSector = null;
+  state.selectedAirport = null;
   rebuildTrips();
   state.demand = await (
     await fetch(`${DATA}/${meta.id}/sectors_demand.json`)
@@ -692,6 +712,12 @@ async function loadSnapshot(i) {
   state.stormcap = await fetch(`${DATA}/${meta.id}/sectors_stormcap.json`)
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null);
+  // storm keep-out boxes per strip (for "plan around weather" rerouting)
+  state.stormBoxes = await fetch(`${DATA}/${meta.id}/storm_boxes.json`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => (j ? j.boxes : null))
+    .catch(() => null);
+  state.wxPlanStats = null;
   // GDP scenario data (optional — only present if gdp.py has been run)
   state.gdpDemand = await fetch(`${DATA}/${meta.id}/sectors_demand_gdp.json`)
     .then((r) => (r.ok ? r.json() : null))
@@ -718,6 +744,7 @@ async function loadSnapshot(i) {
   slider.step = 60;
   slider.value = meta.window_start;
   render();
+  if (state.opts.wxPlan) applyWxPlan(true); // re-plan the new snapshot's flights
 }
 
 // rebuild static TripsLayer data from each flight's CURRENT route (relative
@@ -1103,6 +1130,127 @@ window.AIRSPACE = {
   },
 };
 
+// ---------- "plan around weather": reroute affected flights around storms ----------
+// Given foreknowledge of the storms on its path, a flight flies AROUND them if a
+// clear path exists, else it HOLDS (origin/destination under the storm, or boxed
+// in). Reuses the no-fly-zone router + the toolkit fuel-cost model.
+function planAroundWeather(f, boxes) {
+  let la = f.la.slice(),
+    lo = f.lo.slice();
+  let rerouted = false,
+    held = false;
+  for (const bx of boxes) {
+    const b = { w: bx[0], s: bx[1], e: bx[2], n: bx[3] };
+    const n = la.length;
+    if (pointInBox(lo[0], la[0], b) || pointInBox(lo[n - 1], la[n - 1], b)) {
+      held = true; // can't take off / land through the storm
+      continue;
+    }
+    let crosses = false;
+    for (let i = 0; i < n - 1 && !crosses; i++)
+      if (
+        pointInBox(lo[i], la[i], b) ||
+        segHitsBox(lo[i], la[i], lo[i + 1], la[i + 1], b)
+      )
+        crosses = true;
+    if (!crosses) continue;
+    const rr = rerouteAround(la, lo, b);
+    if (!rr) {
+      held = true; // boxed in — no way around
+      continue;
+    }
+    la = rr.la;
+    lo = rr.lo;
+    rerouted = true;
+  }
+  return { la, lo, rerouted, held };
+}
+
+function restoreWxPlan(f) {
+  if (f._wxorig) {
+    f.la = f._wxorig.la;
+    f.lo = f._wxorig.lo;
+    f.cum = f._wxorig.cum;
+    f.t1 = f._wxorig.t1;
+    delete f._wxorig;
+  }
+  f.wxHeld = false;
+}
+function applyWxPlan(on) {
+  for (const f of state.flights) restoreWxPlan(f);
+  state.wxPlanStats = null;
+  if (!on || !state.stormBoxes) {
+    rebuildTrips();
+    updateMeta();
+    render();
+    return;
+  }
+  let affected = 0,
+    rerouted = 0,
+    held = 0,
+    minor = 0, // affected but no mappable storm to route around
+    extraNm = 0,
+    kg = 0,
+    usd = 0,
+    co2 = 0,
+    delayMin = 0;
+  for (const f of state.flights) {
+    if (!f.cf || !f.cf.length) continue; // only weather-affected flights
+    affected++;
+    const set = new Map(); // storm boxes on this flight's conflict strips
+    for (const [a, b] of f.cf)
+      for (let k = a; k <= b; k++) {
+        const bs = state.stormBoxes[k];
+        if (bs) for (const bx of bs) set.set(bx.join(","), bx);
+      }
+    if (!set.size) {
+      minor++; // storm too small/scattered to map as a keep-out box
+      continue;
+    }
+    const plan = planAroundWeather(f, [...set.values()]);
+    if (plan.held) {
+      held++;
+      f.wxHeld = true;
+      continue;
+    }
+    if (!plan.rerouted) {
+      minor++; // had a box on its strip but route didn't actually cross it
+      continue;
+    }
+    rerouted++;
+    const cum = buildCumulative(plan.la, plan.lo);
+    const origNm = f.cum[f.cum.length - 1] / 1.852;
+    const newNm = cum[cum.length - 1] / 1.852;
+    const eNm = Math.max(0, newNm - origNm);
+    const c = priceDetour(eNm, f.spd);
+    extraNm += eNm;
+    kg += c.kg;
+    usd += c.usd;
+    co2 += c.co2;
+    delayMin += (eNm / f.spd) * 60;
+    f._wxorig = { la: f.la, lo: f.lo, cum: f.cum, t1: f.t1 };
+    f.la = plan.la;
+    f.lo = plan.lo;
+    f.cum = cum;
+    f.t1 = f.t0 + (newNm / f.spd) * 3600;
+  }
+  state.wxPlanStats = {
+    affected,
+    rerouted,
+    held,
+    minor,
+    extraNm: Math.round(extraNm),
+    extraFuelUsd: Math.round(usd),
+    extraFuelKg: Math.round(kg),
+    extraCo2Kg: Math.round(co2),
+    delayMin: Math.round(delayMin),
+    fuelUsdGal: state.fuelUsdGal,
+  };
+  rebuildTrips();
+  updateMeta();
+  render();
+}
+
 // ---------- rendering ----------
 let imageCache = {};
 function wxImage(path) {
@@ -1131,22 +1279,51 @@ function render() {
   // compute live flight positions. In GDP scenario, each flight's whole
   // trajectory is shifted later by its assigned ground delay (constant speed).
   const gdpOn = o.scenario === "gdp";
+  const sel = state.selectedAirport; // spotlighted airport (ICAO) or null
+  const selAp = sel ? state.airportByIcao.get(sel) : null;
   const pts = [];
   const ghosts = []; // baseline positions of held flights (where they'd be sans GDP)
+  const apGhosts = []; // selected airport's flights that are on the ground right now
   const activeIcaos = new Set(); // airports of flights airborne right now
   let nAir = 0,
     nConf = 0;
+  const apStat = { icao: sel, dep: 0, arr: 0, air: 0, ground: 0 };
   for (const f of state.flights) {
     if (state.nfz && f.blocked) continue; // grounded by the no-fly zone
     const delay = gdpOn ? f.gdpDelay || 0 : 0;
     const t0 = f.t0 + delay;
     const t1 = f.t1 + delay;
+    const belongs = sel && (f.o === sel || f.d === sel);
     // ghost: where this held flight would be in the baseline (no-GDP) timeline
     if (gdpOn && delay > 0 && dt >= f.t0 && dt <= f.t1) {
       const gf = (dt - f.t0) / (f.t1 - f.t0);
       ghosts.push({ position: positionAt(f, gf), f });
     }
-    if (dt < t0 || dt > t1) continue;
+    const airborne = dt >= t0 && dt <= t1;
+    if (belongs) {
+      if (f.o === sel) apStat.dep++;
+      if (f.d === sel) apStat.arr++;
+      if (airborne) apStat.air++;
+      else apStat.ground++;
+    }
+    if (!airborne) {
+      // "ghost flight": a selected-airport flight that's on the ground now —
+      // cluster it at the airport (phyllotaxis spiral) so the volume is visible
+      if (belongs && selAp && apGhosts.length < 500) {
+        const gi = apGhosts.length;
+        const ang = gi * 2.39996323; // golden angle
+        const rad = 0.05 * Math.sqrt(gi + 1);
+        apGhosts.push({
+          position: [
+            selAp.lon + rad * Math.cos(ang),
+            selAp.lat + rad * Math.sin(ang) * 0.72,
+          ],
+          f,
+          dep: f.o === sel,
+        });
+      }
+      continue;
+    }
     nAir++;
     activeIcaos.add(f.o);
     activeIcaos.add(f.d);
@@ -1162,13 +1339,20 @@ function render() {
     const a = positionAt(f, Math.max(0, frac - df));
     const b = positionAt(f, Math.min(1, frac + df));
     const bearing = bearingDeg(a[1], a[0], b[1], b[0]);
-    pts.push({ f, position: [lon, lat], conf, bearing, affected });
+    pts.push({
+      f, position: [lon, lat], conf, bearing, affected,
+      held: !!f.wxHeld, belongs,
+    });
   }
   state.conflictPts = pts.filter((p) => p.conf);
+  updateAirportInfo(sel ? apStat : null);
 
   // CLICKING a flight (or its ghost) spotlights it and fades the rest.
   // Hover only updates the tooltip (+ "route of hovered"), no re-render.
   const hl = state.selected;
+  // is the selected flight actually drawn as a plane right now? (a ground/ghost
+  // flight isn't — so we shouldn't dim the whole map for it, just show its route)
+  const hlVisible = hl && pts.some((p) => p.f === hl);
   const onHover = (info) => {
     state.hovered = info.object && info.object.f ? info.object.f : null;
   };
@@ -1178,11 +1362,14 @@ function render() {
   const DIM = 30;
   const flightColor = (d) => {
     let c;
-    if (d.conf) c = [255, 59, 59]; // in storm now/forecast — red
+    if (o.wxPlan && d.held) c = [230, 120, 255]; // can't avoid storm — must hold (violet)
+    else if (d.conf) c = [255, 59, 59]; // in storm now/forecast — red
     else if (o.wxAffected && d.affected) c = [255, 170, 40]; // route hits a storm — amber
     else c = d.f.alt >= 35000 ? [77, 163, 255] : [70, 211, 154];
+    if (sel && d.belongs) c = d.f.d === sel ? [90, 200, 255] : [120, 255, 180]; // arr=cyan, dep=green
     let alpha = 255;
-    if (hl && d.f !== hl) alpha = DIM;
+    if (hlVisible && d.f !== hl) alpha = DIM;
+    else if (sel && !d.belongs) alpha = 16; // spotlight the airport's flights
     else if (o.wxAffected && !d.affected && !d.conf) alpha = 55; // fade the unaffected
     return [c[0], c[1], c[2], alpha];
   };
@@ -1319,6 +1506,89 @@ function render() {
     );
   }
 
+  // selected flight: always show its full route + origin/destination, so a
+  // ground/ghost flight (no plane on screen) is still visible when clicked.
+  if (hl) {
+    const path = hl.la.map((la, i) => [hl.lo[i], la]);
+    const ends = [
+      { position: [hl.lo[0], hl.la[0]], kind: "origin" },
+      {
+        position: [hl.lo[hl.lo.length - 1], hl.la[hl.la.length - 1]],
+        kind: "dest",
+      },
+    ];
+    layers.push(
+      new PathLayer({
+        id: "sel-route",
+        data: [{ path }],
+        getPath: (d) => d.path,
+        getColor: [255, 210, 90, 235],
+        getWidth: 2.5,
+        widthUnits: "pixels",
+      }),
+      new ScatterplotLayer({
+        id: "sel-ends",
+        data: ends,
+        getPosition: (d) => d.position,
+        getRadius: 5,
+        radiusUnits: "pixels",
+        stroked: true,
+        lineWidthMinPixels: 1.5,
+        getLineColor: [20, 24, 32, 255],
+        getFillColor: (d) =>
+          d.kind === "origin" ? [120, 255, 180, 255] : [255, 150, 90, 255],
+      }),
+    );
+  }
+
+  // airport spotlight: the clicked airport's flights — routes of the airborne
+  // ones (a traffic fan) + its on-the-ground "ghost" flights clustered on it.
+  if (sel && selAp) {
+    const fan = pts.filter((p) => p.belongs);
+    if (fan.length)
+      layers.push(
+        new PathLayer({
+          id: "airport-fan",
+          data: fan,
+          getPath: (d) => d.f.la.map((la, i) => [d.f.lo[i], la]),
+          getColor: (d) =>
+            d.f.d === sel ? [90, 200, 255, 80] : [120, 255, 180, 80],
+          getWidth: 1.2,
+          widthUnits: "pixels",
+        }),
+      );
+    if (apGhosts.length)
+      layers.push(
+        new ScatterplotLayer({
+          id: "airport-ghosts",
+          data: apGhosts,
+          pickable: true,
+          getPosition: (d) => d.position,
+          getRadius: (d) => (d.f === hl ? 4 : 2),
+          radiusUnits: "pixels",
+          getFillColor: (d) => (d.dep ? [120, 255, 180, 95] : [90, 200, 255, 95]),
+          updateTriggers: { getRadius: hl },
+          onHover,
+          onClick: (info) => {
+            if (info.object) selectFlight(info.object.f);
+          },
+        }),
+      );
+    layers.push(
+      new ScatterplotLayer({
+        id: "airport-ring",
+        data: [selAp],
+        getPosition: (d) => [d.lon, d.lat],
+        getRadius: 15,
+        radiusUnits: "pixels",
+        stroked: true,
+        filled: false,
+        lineWidthMinPixels: 2,
+        getLineColor: [120, 230, 255, 235],
+      }),
+    );
+  }
+
   // fading motion trails behind every plane (GPU-animated; data is static)
   if (o.motionTrails && state.trips && TripsLayer) {
     layers.push(
@@ -1388,7 +1658,7 @@ function render() {
         getColor: flightColor,
         updateTriggers: {
           getAngle: state.t,
-          getColor: [state.t, hl, o.wxAffected],
+          getColor: [state.t, hl, o.wxAffected, o.wxPlan, sel],
           getSize: [state.t, hl],
         },
         onHover,
@@ -1407,7 +1677,7 @@ function render() {
         radiusMinPixels: 1.5,
         getFillColor: flightColor,
         updateTriggers: {
-          getFillColor: [state.t, hl, o.wxAffected],
+          getFillColor: [state.t, hl, o.wxAffected, o.wxPlan, sel],
           getRadius: [state.t, hl],
         },
         onHover,
@@ -1452,18 +1722,21 @@ function render() {
         if (a.closed && !have.has(a.icao)) aps.push(a);
     }
     const airportColor = (d) =>
-      d.closed
-        ? [255, 70, 70, 245]
-        : d.cancelled > 0
-          ? [245, 160, 40, 245]
-          : [240, 240, 250, 230];
+      d.icao === sel
+        ? [120, 230, 255, 255]
+        : d.closed
+          ? [255, 70, 70, 245]
+          : d.cancelled > 0
+            ? [245, 160, 40, 245]
+            : [240, 240, 250, 230];
     layers.push(
       new ScatterplotLayer({
         id: "airports",
         data: aps,
         pickable: true,
         getPosition: (d) => [d.lon, d.lat],
-        getRadius: (d) => (d.closed || d.cancelled > 0 ? 5 : 4),
+        getRadius: (d) =>
+          d.icao === sel ? 7 : d.closed || d.cancelled > 0 ? 5 : 4,
         radiusUnits: "pixels",
         radiusMinPixels: 2.5,
         stroked: true,
@@ -1471,10 +1744,13 @@ function render() {
         getLineColor: [30, 30, 40, 255],
         getFillColor: airportColor,
         updateTriggers: {
-          getFillColor: [state.nfz, state.t],
-          getRadius: [state.nfz, state.t],
+          getFillColor: [state.nfz, state.t, sel],
+          getRadius: [state.nfz, state.t, sel],
         },
         onHover,
+        onClick: (info) => {
+          if (info.object) selectAirport(info.object.icao);
+        },
       }),
     );
     if (TextLayer) {
@@ -1625,6 +1901,12 @@ function boxFrom(a, b) {
   };
 }
 function startDraw() {
+  if (state.opts.wxPlan) {
+    // no-fly zone and weather-plan both mutate routes — keep them exclusive
+    state.opts.wxPlan = false;
+    document.getElementById("ly-wx-plan").checked = false;
+    applyWxPlan(false);
+  }
   state.drawing = true;
   document.getElementById("nfz-draw").classList.add("active");
   map.getCanvas().style.cursor = "crosshair";
@@ -1666,22 +1948,48 @@ function selectFlight(f) {
   state.selected = state.selected === f ? null : f; // toggle
   render();
 }
-// click on empty map clears the selection (deferred so a flight-click can win)
+// click an airport -> spotlight its flights (+ on-ground ghosts). Toggle off on re-click.
+function selectAirport(icao) {
+  lastSelectAt = performance.now();
+  state.selectedAirport = state.selectedAirport === icao ? null : icao;
+  if (!state.selectedAirport) updateAirportInfo(null);
+  render();
+}
+function updateAirportInfo(stat) {
+  const el = document.getElementById("airport-info");
+  if (!el) return;
+  if (!stat || !stat.icao) {
+    el.hidden = true;
+    return;
+  }
+  const total = stat.dep + stat.arr;
+  el.hidden = false;
+  el.innerHTML =
+    `<button id="ap-close" title="clear">×</button>` +
+    `<b>${stat.icao}</b> · ${total.toLocaleString()} flights ` +
+    `<span class="ap-sub">(${stat.dep} dep · ${stat.arr} arr)</span><br>` +
+    `<span class="ap-air">● ${stat.air} airborne now</span> · ` +
+    `<span class="ap-ground">○ ${stat.ground} on ground</span>`;
+  document.getElementById("ap-close").onclick = () => selectAirport(stat.icao);
+}
+function clearSelections() {
+  if (!state.selected && !state.selectedAirport) return false;
+  state.selected = null;
+  state.selectedAirport = null;
+  updateAirportInfo(null);
+  render();
+  return true;
+}
+// click on empty map clears the selection (deferred so a flight/airport click can win)
 map.on("click", () => {
   if (state.drawing) return;
   setTimeout(() => {
-    if (performance.now() - lastSelectAt < 60) return; // a flight was just clicked
-    if (state.selected) {
-      state.selected = null;
-      render();
-    }
+    if (performance.now() - lastSelectAt < 60) return; // a marker was just clicked
+    clearSelections();
   }, 0);
 });
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && state.selected) {
-    state.selected = null;
-    render();
-  }
+  if (e.key === "Escape") clearSelections();
 });
 
 // ---------- right-side dock (always present; collapsible) ----------
@@ -1919,6 +2227,11 @@ document.getElementById("ly-stormcap").onchange = (e) => {
 document.getElementById("horizon").onchange = (e) => {
   state.opts.horizon = +e.target.value;
   render();
+};
+document.getElementById("ly-wx-plan").onchange = (e) => {
+  state.opts.wxPlan = e.target.checked;
+  if (state.opts.wxPlan && state.nfz) clearNFZ(); // both mutate routes — exclusive
+  applyWxPlan(state.opts.wxPlan);
 };
 document.getElementById("airport-mode").onchange = (e) => {
   state.opts.airports = e.target.value;

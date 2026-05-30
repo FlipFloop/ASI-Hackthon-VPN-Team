@@ -15,6 +15,8 @@
   <body>
     <div id="map"></div>
 
+    <div id="airport-info" hidden></div>
+
     <div id="rightdock">
       <div id="rd-tabs">
         <button data-tab="sectors" class="active">Sectors</button>
@@ -78,6 +80,13 @@
         </select>
       </label>
 
+      <label class="layers" style="margin: 6px 0">
+        <label
+          ><input type="checkbox" id="ly-wx-plan" /> Plan around weather
+          (reroute, else hold)</label
+        >
+      </label>
+
       <label class="row">
         <span>Airports</span>
         <select id="airport-mode">
@@ -135,6 +144,10 @@
         <div>
           <span class="dot wx-affected"></span> route crosses a storm
           (weather-affected)
+        </div>
+        <div>
+          <span class="dot wx-held"></span> can't avoid storm — must hold (plan
+          mode)
         </div>
         <div><span class="dot high"></span> HIGH band (&ge;35k ft)</div>
         <div><span class="dot low"></span> LOW band (&lt;35k ft)</div>

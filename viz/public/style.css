@@ -50,6 +50,22 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, san
 .speed select { background: #2a3140; color: #e8edf4; border: 1px solid #3a4252; border-radius: 6px; padding: 2px 4px; }
 .stats { font-size: 11px; color: #9fb0c4; min-width: 220px; text-align: right; font-variant-numeric: tabular-nums; }
 
+#airport-info {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 12;
+  padding: 9px 30px 9px 14px; border-radius: 9px; font-size: 12px; line-height: 1.5;
+  background: rgba(16, 22, 34, 0.94); color: #e8edf4; border: 1px solid #2a3a52;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.45); backdrop-filter: blur(6px);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+#airport-info b { color: #78d8ff; font-size: 13px; }
+#airport-info .ap-sub { color: #9fb0c4; }
+#airport-info .ap-air { color: #78ffb4; }
+#airport-info .ap-ground { color: #8aa0c0; }
+#ap-close { position: absolute; top: 6px; right: 8px; width: 18px; height: 18px;
+  border: none; background: transparent; color: #8aa0c0; font-size: 15px; cursor: pointer;
+  line-height: 1; padding: 0; }
+#ap-close:hover { color: #ff9a9a; }
+
 .tooltip {
   font-size: 12px; line-height: 1.5; background: #11151c !important;
   color: #e8edf4 !important; padding: 8px 10px !important; border-radius: 6px;
@@ -66,7 +82,10 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, san
 .ghost-note { color: #8a93a6; font-style: italic; }
 .wx-box { margin-top: 8px; padding: 7px 9px; background: rgba(255,170,40,0.1);
   border: 1px solid #6a5330; border-radius: 6px; font-size: 11px; line-height: 1.5; color: #f0e0c8; }
+.wxplan-box { margin-top: 8px; padding: 7px 9px; background: rgba(120,200,120,0.1);
+  border: 1px solid #3a6a4a; border-radius: 6px; font-size: 11px; line-height: 1.5; color: #cfead6; }
 .dot.wx-affected { background: #ffaa28; }
+.dot.wx-held { background: #e678ff; }
 .nfz-box { margin-top: 8px; padding: 7px 9px; background: rgba(255,80,80,0.12);
   border: 1px solid #6a3a3a; border-radius: 6px; font-size: 11px; line-height: 1.5; color: #f0cdcd; }
 .nfz-cost { color: #ffd9a0; font-weight: 600; }

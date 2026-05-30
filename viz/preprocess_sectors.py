@@ -292,6 +292,12 @@ def process_snapshot(snap_dir, snap_id, bands, trees):
                    "HIGH": stormcap["HIGH"], "LOW": stormcap["LOW"]},
                   f, separators=(",", ":"))
 
+    # storm keep-out boxes per strip (frontend reroutes flights around these)
+    storm_boxes = compute_storm_boxes(snap_dir)
+    with open(os.path.join(OUT, snap_id, "storm_boxes.json"), "w") as f:
+        json.dump({"n_strips": len(storm_boxes), "boxes": storm_boxes},
+                  f, separators=(",", ":"))
+
     # quick stats
     peak = 0
     over = 0
