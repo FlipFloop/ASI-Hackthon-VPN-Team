@@ -9,6 +9,9 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, san
   border-radius: 10px; backdrop-filter: blur(6px);
   box-shadow: 0 4px 24px rgba(0,0,0,0.4);
   font-size: 13px;
+  /* never run past the timebar — scroll the panel's own content instead */
+  max-height: calc(100vh - 84px);
+  overflow-y: auto; overscroll-behavior: contain;
 }
 #panel h1 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
 #panel .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; gap: 8px; }
@@ -60,6 +63,13 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, san
 .ghost-note { color: #8a93a6; font-style: italic; }
 .nfz-box { margin-top: 8px; padding: 7px 9px; background: rgba(255,80,80,0.12);
   border: 1px solid #6a3a3a; border-radius: 6px; font-size: 11px; line-height: 1.5; color: #f0cdcd; }
+.nfz-cost { color: #ffd9a0; font-weight: 600; }
+.aar-line { margin-top: 6px; padding-top: 6px; border-top: 1px solid #5a3a3a; }
+.cdm-save { color: #54d98c; font-weight: 600; }
+.slider output { align-self: flex-end; color: #cfe0f4; font-size: 11px; font-variant-numeric: tabular-nums; }
+.fuel-src { color: #6f7f93; font-size: 10px; font-style: italic; }
+.fuel-src.live { color: #46d39a; font-style: normal; }
+.fuel-src.live::before { content: "● "; }
 .nfz-row { gap: 6px; }
 .nfz-row .panel-btn { width: auto; flex: 1; margin: 4px 0; text-align: center; }
 #nfz-draw.active { background: #b33; border-color: #f55; color: #fff; }

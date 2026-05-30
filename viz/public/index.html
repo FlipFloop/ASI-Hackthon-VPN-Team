@@ -89,6 +89,19 @@
       </div>
 
       <label class="row slider">
+        <span>Fuel $/gal <a id="fuel-live-link" class="stat-link" title="reset to live market price">use live</a></span>
+        <input type="range" id="fuel-price" min="1.5" max="6" step="0.01" value="3.67" />
+        <output id="fuel-price-out">3.67</output>
+        <span id="fuel-src" class="fuel-src">manual</span>
+      </label>
+
+      <label class="row slider">
+        <span>Acceptance rate (arrivals/hr)</span>
+        <input type="range" id="aar" min="20" max="90" step="1" value="55" />
+        <output id="aar-out">55</output>
+      </label>
+
+      <label class="row slider">
         <span>Weather opacity</span>
         <input type="range" id="wx-opacity" min="0" max="100" value="70" />
       </label>

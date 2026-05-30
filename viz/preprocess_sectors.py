@@ -21,7 +21,7 @@ import gzip
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from glob import glob
 
 import numpy as np
@@ -32,9 +32,86 @@ BUNDLE = os.path.join(os.path.dirname(__file__), "..", "hackathon_data_bundle")
 OUT = os.path.join(os.path.dirname(__file__), "public", "data")
 INTERVAL = 300  # seconds between demand samples
 
+# ---- weather grid (from documentation/wx/FILE_FORMAT.md) — for storm-cap ----
+LAT_MIN, LAT_MAX = 21.943, 55.7765
+LON_MIN, LON_MAX = -135.0, -67.5
+ROWS, COLS = 256, 358
+REFC_HEAVY = 40.0   # dBZ; >= this reduces sector capacity (storm cell)
+STORMCAP_NEAR_S = 8 * 60  # snap a timestep to a strip within this many seconds
+
 
 def parse_iso(s):
     return datetime.fromisoformat(s).timestamp()
+
+
+def parse_strip_name(fname):
+    """'<based>_<from>_<to>.npz' (each YYYY-MM-DD_HH:MM:SS, UTC) -> (from, to) epoch."""
+    p = os.path.basename(fname)[:-4].split("_")  # 6 tokens
+    vf = datetime.strptime(f"{p[2]} {p[3]}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    vt = datetime.strptime(f"{p[4]} {p[5]}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    return vf.timestamp(), vt.timestamp()
+
+
+def compute_stormcap(snap_dir, ws, n_steps, bands, trees):
+    """Per-sector, per-timestep capacity-reduction factor (0..1) from heavy
+    precip, ported from App/build_data.py §4. A sector loses 30–100% capacity
+    when refc >= 40 dBZ cells sit inside it, scaled by storm severity (intensity
+    + coverage). Output shape mirrors sectors_demand: {band: {name: [f per step]}}."""
+    files = sorted(glob(os.path.join(snap_dir, "wx", "refc", "*.npz")),
+                   key=lambda p: parse_strip_name(p)[0])
+    out = {"HIGH": {}, "LOW": {}}
+    if not files:
+        return out
+    strips = [(parse_strip_name(p), p) for p in files]
+
+    # aggregate heavy cells -> containing sector, once per strip
+    strip_agg = {}  # path -> {(band, name): [heavy_count, max_dBZ]}
+    for (_vf, _vt), p in strips:
+        m = np.load(p)["matrix"]
+        ii, jj = np.where(m >= REFC_HEAVY)
+        agg = {}
+        if len(ii):
+            lats = LAT_MAX - (ii + 0.5) * (LAT_MAX - LAT_MIN) / ROWS
+            lons = LON_MIN + (jj + 0.5) * (LON_MAX - LON_MIN) / COLS
+            vals = m[ii, jj]
+            for band in ("HIGH", "LOW"):
+                pts = shp_points(np.column_stack([lons, lats]))
+                pt_idx, sec_idx = trees[band].query(pts, predicate="within")
+                for pk, sk in zip(pt_idx, sec_idx):
+                    key = (band, bands[band][sk]["name"])
+                    v = float(vals[pk])
+                    a = agg.get(key)
+                    if a is None:
+                        agg[key] = [1, v]
+                    else:
+                        a[0] += 1
+                        a[1] = max(a[1], v)
+        strip_agg[p] = agg
+
+    def reduction(cnt, maxv):
+        intensity = max(0.0, min(1.0, (maxv - 40) / 15.0))  # 40 dBZ->0, 55->1
+        coverage = max(0.0, min(1.0, cnt / 6.0))            # 6+ cells -> full
+        sev = max(0.0, min(1.0, 0.5 * intensity + 0.5 * coverage))
+        return round(0.3 + 0.7 * sev, 2)                    # 0.30 .. 1.00
+
+    for k in range(n_steps):
+        t = ws + k * INTERVAL
+        chosen = next((p for (vf, vt), p in strips if vf <= t < vt), None)
+        if chosen is None:  # mid-gap: snap to nearest strip start within 8 min
+            best, bd = None, STORMCAP_NEAR_S
+            for (vf, _vt), p in strips:
+                if abs(vf - t) <= bd:
+                    bd, best = abs(vf - t), p
+            chosen = best
+        if chosen is None:
+            continue
+        for (band, name), (cnt, maxv) in strip_agg.get(chosen, {}).items():
+            arr = out[band].setdefault(name, [0.0] * n_steps)
+            arr[k] = reduction(cnt, maxv)
+
+    for band in ("HIGH", "LOW"):  # keep only sectors ever reduced
+        out[band] = {k: v for k, v in out[band].items() if any(v)}
+    return out
 
 
 def open_maybe_gz(path_base):
@@ -159,6 +236,14 @@ def process_snapshot(snap_dir, snap_id, bands, trees):
     with open(os.path.join(OUT, snap_id, "sectors_demand.json"), "w") as f:
         json.dump(out, f, separators=(",", ":"))
 
+    # storm-driven capacity reduction (weather -> effective sector capacity)
+    stormcap = compute_stormcap(snap_dir, ws, n_steps, bands, trees)
+    n_storm = len(stormcap["HIGH"]) + len(stormcap["LOW"])
+    with open(os.path.join(OUT, snap_id, "sectors_stormcap.json"), "w") as f:
+        json.dump({"grid_start": ws, "interval": INTERVAL, "n_steps": n_steps,
+                   "HIGH": stormcap["HIGH"], "LOW": stormcap["LOW"]},
+                  f, separators=(",", ":"))
+
     # quick stats
     peak = 0
     over = 0
@@ -169,7 +254,8 @@ def process_snapshot(snap_dir, snap_id, bands, trees):
             peak = max(peak, m)
             if m > cap[name]:
                 over += 1
-    return {"n_steps": n_steps, "peak": peak, "over_sectors": over}
+    return {"n_steps": n_steps, "peak": peak, "over_sectors": over,
+            "storm_sectors": n_storm}
 
 
 def main():
@@ -186,7 +272,8 @@ def main():
             continue
         stats = process_snapshot(d, snap_id, bands, trees)
         print(f"  {snap_id}: steps={stats['n_steps']} peak_in_sector={stats['peak']} "
-              f"over_demand_sectors={stats['over_sectors']}")
+              f"over_demand_sectors={stats['over_sectors']} "
+              f"storm_reduced_sectors={stats['storm_sectors']}")
     print("Done.")
 
 

@@ -77,8 +77,10 @@ const state = {
   frame: 0, // render counter (for throttling dock list rebuilds)
   nfz: null, // active no-fly zone {w,s,e,n}
   nfzPreview: null, // box being dragged
-  nfzStats: null, // { rerouted, grounded, addedDelayMin, overBefore, overAfter }
+  nfzStats: null, // { rerouted, grounded, addedDelayMin, overBefore, overAfter, + fuel cost }
   nfzDemand: null, // sector demand recomputed from rerouted routes
+  fuelUsdGal: 3.67, // jet-fuel price used to price reroute detours (live default)
+  aar: 55, // airport acceptance rate (arrivals/hr) for arrival-hold metering
   baselineDemandJS: null, // baseline demand via the same JS method (for honest before/after)
   drawing: false, // no-fly-zone draw mode active
   sectorIndex: null, // { HIGH, LOW } spatial grid index for point-in-sector
@@ -451,12 +453,26 @@ function updateMeta() {
   }
   if (state.nfzStats) {
     const s = state.nfzStats;
+    const n = (x) => x.toLocaleString("en-US");
     html +=
       `<div class="nfz-box"><b>No-fly zone</b><br>` +
       `${s.rerouted} rerouted · ${s.grounded} grounded<br>` +
-      `+${s.addedDelayMin} min total reroute delay<br>` +
+      `+${s.addedDelayMin} min total reroute delay · +${n(s.extraNm)} nm<br>` +
+      `<span class="nfz-cost">+$${n(s.extraFuelUsd)} fuel · ` +
+      `+${n(s.extraFuelKg)} kg · +${n(s.extraCo2Kg)} kg CO₂</span><br>` +
+      `<span class="ghost-note">@ $${s.fuelUsdGal.toFixed(2)}/gal</span><br>` +
       `over-capacity sectors <b>${s.overBefore} → ${s.overAfter}</b><br>` +
-      `airports: ${s.airportsClosed} closed · ${s.airportsAffected} affected</div>`;
+      `airports: ${s.airportsClosed} closed · ${s.airportsAffected} affected` +
+      `<div class="aar-line">arrivals metered @ <b>${s.aar}/hr</b> · ` +
+      `air-hold ${n(s.airHoldMin)}m / gate ${n(s.gateHoldMin)}m<br>` +
+      (s.aarHoldUsdExtra !== 0
+        ? `zone ${s.aarHoldUsdExtra > 0 ? "adds" : "saves"} ` +
+          `<span class="nfz-cost">$${n(Math.abs(s.aarHoldUsdExtra))}</span> arrival-hold fuel<br>`
+        : "") +
+      `CDM substitution saves <span class="cdm-save">$${n(s.cdmSaveUsd)}` +
+      ` · ${n(s.cdmSaveCo2Kg)} kg CO₂</span><br>` +
+      `<span class="ghost-note" title="planes circling so long they risk a fuel diversion">` +
+      `diversion risk ${s.divRbs} → ${s.divSub} flights</span></div></div>`;
   }
   document.getElementById("meta").innerHTML = html;
 }
@@ -647,6 +663,144 @@ function rebuildTrips() {
   });
 }
 
+// ---------- fuel-cost model (ported from holdcost.burn_kghr + autoroute._package) ----------
+// Prices a reroute detour in fuel / dollars / CO2, using the SAME constants and
+// burn curve the Python toolkit uses, so the viz and the algorithm agree.
+const CO2_PER_KG_FUEL = 3.16; // kg CO2 per kg Jet-A burned (ICAO)
+const JETA_KG_PER_GAL = 3.04; // Jet-A density
+// piecewise-linear cruise/hold burn proxy from cruise speed (kt -> kg/hr).
+// turboprop ~350, RJ ~1400, narrowbody ~2400, widebody ~3300.
+function burnKgHr(spdKt) {
+  const xs = [120, 200, 300, 400, 460, 510];
+  const ys = [350, 650, 1400, 2300, 2700, 3300];
+  if (spdKt <= xs[0]) return ys[0];
+  if (spdKt >= xs[xs.length - 1]) return ys[ys.length - 1];
+  for (let i = 1; i < xs.length; i++) {
+    if (spdKt <= xs[i]) {
+      const t = (spdKt - xs[i - 1]) / (xs[i] - xs[i - 1]);
+      return ys[i - 1] + t * (ys[i] - ys[i - 1]);
+    }
+  }
+  return ys[ys.length - 1];
+}
+// extra nautical miles of a detour -> {kg, usd, co2} at the current fuel price.
+// Mirrors autoroute._package: extra_kg = extra_nm/spd*burn; usd = kg/density*price.
+function priceDetour(extraNm, spdKt) {
+  const burn = burnKgHr(spdKt);
+  const kg = (extraNm / Math.max(spdKt, 1)) * burn; // extra_min/60 * burn
+  const usd = (kg / JETA_KG_PER_GAL) * state.fuelUsdGal;
+  const co2 = kg * CO2_PER_KG_FUEL;
+  return { kg, usd, co2 };
+}
+
+// ---------- AAR arrival metering + CDM cheapest-absorber (ported from holdcost.py) ----------
+// Airport Acceptance Rate (AAR) meters arrivals: each landing takes 3600/AAR sec,
+// so when reroutes delay/bunch arrivals a queue forms and planes must HOLD. WHERE
+// a plane holds is a fuel decision priced at the LIVE fuel price:
+//   already airborne -> air-hold (circle the airport), burns cruise burn_kghr ($$$)
+//   not yet departed  -> gate-hold (depart later), burns ~APU only (cheap)
+// CDM substitution reshuffles a carrier's OWN flights across its OWN slots so the
+// cheap / gate-holdable ones absorb the wait and the expensive jets land on time.
+const GATE_BURN_KGHR = 120.0; // APU burn while gate-held (vs ~0 air; honest)
+const AIR_RESERVE_MIN = 45.0; // holding-fuel reserve -> diversion risk past this
+const DIVERSION_PENALTY_MIN = 90.0; // extra burn-equiv minutes if reserve blown
+
+function airlineOf(fn) {
+  if (/^N\d/.test(fn || "")) return "GA"; // tail number -> general aviation
+  const m = /^([A-Z]+)/.exec(fn || "");
+  return m ? m[1] : "OTH";
+}
+// single-server GDP metering at constant AAR -> RBS slot time per flight (epoch s)
+function meterSlots(etas, aar) {
+  const order = etas.map((_, i) => i).sort((a, b) => etas[a] - etas[b]);
+  const slots = new Array(etas.length);
+  const step = 3600 / Math.max(aar, 1);
+  let free = -Infinity;
+  for (const k of order) {
+    const t = Math.max(etas[k], free);
+    free = t + step;
+    slots[k] = t;
+  }
+  return slots;
+}
+// fuel (kg) to absorb `delayMin`: air-hold burns cruise burn (+diversion tail past
+// reserve); gate-hold burns only APU. This is where the live fuel price bites.
+function holdFuelKg(delayMin, airborne, burn) {
+  if (airborne) {
+    let kg = (delayMin / 60) * burn;
+    if (delayMin > AIR_RESERVE_MIN) kg += (DIVERSION_PENALTY_MIN / 60) * burn;
+    return kg;
+  }
+  return (delayMin / 60) * GATE_BURN_KGHR;
+}
+// CDM cheapest-absorber over one carrier's own slot set: airborne flights (must
+// burn to hold) grab earliest feasible slots in ETA order; gate-holdable flights
+// absorb the latest. Returns {localIdx: delayMin}. Mirrors holdcost._assign.
+function assignCheapest(idxs, slotSet, etas, airborne) {
+  const slots = [...slotSet].sort((a, b) => a - b);
+  const used = new Array(slots.length).fill(false);
+  const air = idxs.filter((k) => airborne[k]).sort((a, b) => etas[a] - etas[b]);
+  const gnd = idxs.filter((k) => !airborne[k]).sort((a, b) => etas[b] - etas[a]);
+  const grab = (eta, rev) => {
+    const a = rev ? slots.length - 1 : 0;
+    const b = rev ? -1 : slots.length;
+    const d = rev ? -1 : 1;
+    for (let s = a; s !== b; s += d)
+      if (!used[s] && slots[s] >= eta) return (used[s] = true), slots[s];
+    for (let s = a; s !== b; s += d)
+      if (!used[s]) return (used[s] = true), slots[s];
+    return eta;
+  };
+  const res = {};
+  for (const k of air) res[k] = Math.max(0, (grab(etas[k], false) - etas[k]) / 60);
+  for (const k of gnd) res[k] = Math.max(0, (grab(etas[k], true) - etas[k]) / 60);
+  return res;
+}
+// Meter every destination airport at the AAR and price holds under RBS (FAA today)
+// and CDM substitution (cost-optimized). etaOf(f) picks which landing time to use.
+// Returns fleet totals. Mirrors holdcost.build_event's policy loop, system-wide.
+function meterArrivals(flights, etaOf, aar) {
+  const byAirport = new Map();
+  flights.forEach((f, i) => {
+    const a = byAirport.get(f.d) || byAirport.set(f.d, []).get(f.d);
+    a.push(i);
+  });
+  const dkg = state.fuelUsdGal / JETA_KG_PER_GAL;
+  let rbsKg = 0, subKg = 0, airMin = 0, gateMin = 0, divRbs = 0, divSub = 0;
+  for (const idxs of byAirport.values()) {
+    const etas = idxs.map((i) => etaOf(flights[i]));
+    const air = idxs.map((i) => flights[i].air);
+    const burn = idxs.map((i) => burnKgHr(flights[i].spd));
+    const slot = meterSlots(etas, aar);
+    const rbsDelay = etas.map((e, j) => Math.max(0, (slot[j] - e) / 60));
+    // CDM substitution within each carrier (reassign its own slots)
+    const subDelay = new Array(idxs.length).fill(0);
+    const carriers = new Map();
+    idxs.forEach((gi, j) => {
+      const c = airlineOf(flights[gi].fn);
+      (carriers.get(c) || carriers.set(c, []).get(c)).push(j);
+    });
+    for (const g of carriers.values()) {
+      const d = assignCheapest(g, g.map((j) => slot[j]), etas, air);
+      for (const j of g) subDelay[j] = d[j];
+    }
+    for (let j = 0; j < idxs.length; j++) {
+      rbsKg += holdFuelKg(rbsDelay[j], air[j], burn[j]);
+      subKg += holdFuelKg(subDelay[j], air[j], burn[j]);
+      if (air[j]) {
+        airMin += rbsDelay[j];
+        if (rbsDelay[j] > AIR_RESERVE_MIN) divRbs++;
+        if (subDelay[j] > AIR_RESERVE_MIN) divSub++;
+      } else gateMin += rbsDelay[j];
+    }
+  }
+  return {
+    rbsUsd: rbsKg * dkg, subUsd: subKg * dkg,
+    rbsCo2: rbsKg * CO2_PER_KG_FUEL, subCo2: subKg * CO2_PER_KG_FUEL,
+    airMin, gateMin, divRbs, divSub,
+  };
+}
+
 // ---------- no-fly zone: reroute every affected flight around the box ----------
 function restoreFlight(f) {
   if (f._orig) {
@@ -683,7 +837,12 @@ function applyNFZ(box) {
   // 3. reroute / ground every affected flight
   let rerouted = 0,
     grounded = 0,
-    addedDelay = 0;
+    addedDelay = 0,
+    extraNmTot = 0, // total detour distance (nm) across the fleet
+    extraKgTot = 0, // extra fuel burned (kg)
+    extraUsdTot = 0, // extra fuel cost ($)
+    extraCo2Tot = 0; // extra CO2 (kg)
+  const impacted = new Set(); // destination airports the zone disrupts
   for (const f of state.flights) {
     const n = f.la.length;
     if (
@@ -692,6 +851,7 @@ function applyNFZ(box) {
     ) {
       f.blocked = true; // origin/destination inside the zone — can't reroute
       grounded++;
+      impacted.add(f.d);
       const ao = state.airportByIcao.get(f.o),
         ad = state.airportByIcao.get(f.d);
       if (ao) ao.cancelled++;
@@ -700,10 +860,19 @@ function applyNFZ(box) {
     }
     const rr = rerouteAround(f.la, f.lo, box);
     if (!rr) continue;
+    impacted.add(f.d); // this flight now lands later -> its airport's queue shifts
+    const origNm = f.cum[f.cum.length - 1] / 1.852; // filed route (nm)
     const cum = buildCumulative(rr.la, rr.lo);
     const nm = cum[cum.length - 1] / 1.852; // km -> nautical miles
     const newT1 = f.t0 + (nm / f.spd) * 3600; // constant speed -> later landing
     addedDelay += Math.max(0, newT1 - f.t1);
+    // price the detour with the toolkit's fuel-cost model
+    const extraNm = Math.max(0, nm - origNm);
+    const c = priceDetour(extraNm, f.spd);
+    extraNmTot += extraNm;
+    extraKgTot += c.kg;
+    extraUsdTot += c.usd;
+    extraCo2Tot += c.co2;
     f._orig = { la: f.la, lo: f.lo, cum: f.cum, t1: f.t1 };
     f.la = rr.la;
     f.lo = rr.lo;
@@ -711,6 +880,20 @@ function applyNFZ(box) {
     f.t1 = newT1;
     rerouted++;
   }
+  // 3b. AAR arrival metering, scoped to the airports the zone disrupts: reroutes
+  //     land flights later / groundings remove them, changing those airports'
+  //     arrival queues. Price the resulting holds (air vs gate, by live fuel)
+  //     under RBS and CDM substitution. Baseline uses each flight's ORIGINAL
+  //     landing time so the delta isolates the zone's effect.
+  const atImpacted = (f) => impacted.has(f.d);
+  const flyingNow = state.flights.filter((f) => !f.blocked && atImpacted(f));
+  const postAAR = meterArrivals(flyingNow, (f) => f.t1, state.aar);
+  const baseAAR = meterArrivals(
+    state.flights.filter(atImpacted),
+    (f) => (f._orig ? f._orig.t1 : f.t1),
+    state.aar,
+  );
+
   // 4. recompute the sector demand cascade from the rerouted routes
   state.nfz = box;
   state.nfzDemand = computeDemandFromRoutes();
@@ -723,6 +906,20 @@ function applyNFZ(box) {
     airportsClosed: state.airports.filter((a) => a.closed).length,
     airportsAffected: state.airports.filter((a) => !a.closed && a.cancelled > 0)
       .length,
+    extraNm: Math.round(extraNmTot),
+    extraFuelKg: Math.round(extraKgTot),
+    extraFuelUsd: Math.round(extraUsdTot),
+    extraCo2Kg: Math.round(extraCo2Tot),
+    fuelUsdGal: state.fuelUsdGal,
+    // AAR arrival-hold (live-fuel-priced air-vs-gate decision)
+    aar: state.aar,
+    aarHoldUsdExtra: Math.round(postAAR.rbsUsd - baseAAR.rbsUsd), // zone-attributable
+    cdmSaveUsd: Math.round(postAAR.rbsUsd - postAAR.subUsd), // optimization win
+    cdmSaveCo2Kg: Math.round(postAAR.rbsCo2 - postAAR.subCo2),
+    airHoldMin: Math.round(postAAR.airMin),
+    gateHoldMin: Math.round(postAAR.gateMin),
+    divRbs: postAAR.divRbs,
+    divSub: postAAR.divSub,
   };
   rebuildTrips();
   updateMeta();
@@ -1532,6 +1729,42 @@ document.getElementById("share").onclick = copyShare;
 document.getElementById("nfz-draw").onclick = () =>
   state.drawing ? endDraw() : startDraw();
 document.getElementById("nfz-clear").onclick = clearNFZ;
+// set the fuel price + label, then re-price the active reroute (if any).
+// src: "manual" | a live-feed description string.
+function setFuelPrice(v, src) {
+  state.fuelUsdGal = v;
+  document.getElementById("fuel-price").value = v;
+  document.getElementById("fuel-price-out").textContent = v.toFixed(2);
+  const el = document.getElementById("fuel-src");
+  const live = src && src !== "manual";
+  el.textContent = live ? src : "manual";
+  el.title = live ? src : "drag to set a hypothetical price";
+  el.classList.toggle("live", !!live);
+  if (state.nfz) applyNFZ(state.nfz);
+}
+document.getElementById("fuel-price").oninput = (e) =>
+  setFuelPrice(+e.target.value, "manual");
+
+// pull the live jet-fuel price from the optional /api/fuel endpoint (serve.py).
+// Static file servers 404 it — we just keep the slider default then.
+async function loadLiveFuel() {
+  try {
+    const r = await fetch("/api/fuel");
+    if (!r.ok) return;
+    const p = await r.json();
+    if (p && p.live && isFinite(p.usd_per_gal)) {
+      setFuelPrice(+p.usd_per_gal, `live · ${p.as_of || p.source || "market"}`);
+    }
+  } catch (_) {
+    /* offline / static server — manual slider stands */
+  }
+}
+document.getElementById("fuel-live-link").onclick = loadLiveFuel;
+document.getElementById("aar").oninput = (e) => {
+  state.aar = +e.target.value;
+  document.getElementById("aar-out").textContent = state.aar;
+  if (state.nfz) applyNFZ(state.nfz); // re-meter arrivals at the new rate
+};
 document.getElementById("rd-collapse").onclick = () =>
   setCollapsed(!state.dockCollapsed);
 document.querySelectorAll("#rd-tabs button[data-tab]").forEach((b) => {
@@ -1540,3 +1773,5 @@ document.querySelectorAll("#rd-tabs button[data-tab]").forEach((b) => {
 
 // Load data independently of the basemap so the app works even if tiles are slow.
 loadIndex().catch((e) => console.error("loadIndex failed:", e));
+loadLiveFuel(); // best-effort: upgrade the slider to the live market price
+

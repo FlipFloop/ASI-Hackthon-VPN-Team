@@ -44,8 +44,52 @@ and motion trails. Example:
 - **Plane trails** — fading motion trail behind every plane (deck.gl TripsLayer)
 - **Sectors** dropdown — overlay LOW or HIGH band sectors colored by demand;
   red = over capacity; status bar shows how many are over capacity right now
+- **Draw no-fly zone** — drag a keep-out box on the map; every affected flight is
+  rerouted around it (or grounded if its origin/destination is inside), the
+  sector-demand cascade is recomputed, and the detour is **priced in fuel / $ /
+  CO₂** (see below)
+- **Fuel $/gal** slider — the price used to value reroute detours; drag it and the
+  cost readout updates live (the right decision moves with the fuel market). On
+  load it auto-pulls the **live** market price via `/api/fuel` (served by
+  `serve.py`, proxying the toolkit's `fuelfeed.py` — ULSD/NY-Harbor front-month);
+  the chip shows `● live` vs `manual`, and **use live** resets to market. If the
+  page is served by a plain static server (no `/api/fuel`), it falls back to the
+  slider default.
 - Hover a flight for callsign / route / altitude / conflict status, or a sector
   for its demand / capacity
+
+### Reroute fuel cost (from the algorithm toolkit)
+
+When a no-fly zone is active, the panel reports the fleet-wide cost of flying
+around it: total extra distance, extra fuel (kg), extra fuel **$**, and extra
+**CO₂** (kg), at the current `Fuel $/gal`. The cost model is ported directly from
+the hackathon toolkit so the viz and the algorithm agree:
+
+- burn curve = `holdcost.burn_kghr` (cruise-speed → kg/hr, piecewise-linear)
+- cost chain = `autoroute._package`:
+  `extra_kg = extra_nm/spd·burn`, `$ = kg/JETA_KG_PER_GAL·price`,
+  `CO₂ = kg·CO2_PER_KG_FUEL` (constants 3.04 / 3.16)
+
+It's computed in the browser per reroute — no backend — reusing the new-vs-filed
+distance the reroute already calculates.
+
+### Air-hold vs gate-hold, decided by the live fuel price
+
+Rerouting also shifts when planes arrive, so the no-fly-zone panel meters each
+**impacted** destination airport at the **Acceptance rate (arrivals/hr)** slider and
+prices the resulting holds — this is where the live fuel price decides *circle vs
+ground*. Ported from `holdcost.py`:
+
+- **air-hold** (a plane already airborne circles the field) burns cruise
+  `burn_kghr` at the live $/gal — expensive; past `AIR_RESERVE_MIN` (45 min) it
+  flags a **diversion risk**.
+- **gate-hold** (a plane not yet departed simply leaves later) burns only APU
+  (`GATE_BURN_KGHR`) — cheap.
+- **CDM substitution** reshuffles each carrier's *own* flights across its *own*
+  RBS slots (`holdcost._assign`) so the cheap/gate-holdable planes absorb the wait
+  and the expensive jets land on time — the panel shows the **$ + CO₂ it saves vs
+  RBS** and how it cuts **diversion-risk** flights. Drag the **Acceptance rate** or
+  **Fuel $/gal** sliders and these numbers move live.
 
 ## How it's built
 
@@ -69,5 +113,6 @@ offline, in Python.
 
 ## Not yet included
 
-- Conflict resolution (rerouting / delay suggestions)
+- Per-flight A\* reroute via the Python `autoroute.reroute` (the in-browser
+  reroute is a fast visibility-graph approximation; the cost model is the toolkit's)
 - Per-sector demand timeline chart (click a sector to plot its curve)

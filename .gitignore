@@ -14,3 +14,5 @@ viz/public/data/
 
 # Editor / Claude local
 .claude/
+
+./App
