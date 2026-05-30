@@ -14,6 +14,8 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, san
   overflow-y: auto; overscroll-behavior: contain;
 }
 #panel h1 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+.feed-link { float: right; font-size: 11px; font-weight: 500; color: #54d98c; text-decoration: none; }
+.feed-link:hover { text-decoration: underline; }
 #panel .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; gap: 8px; }
 #panel select, #panel input[type=range] { background: #2a3140; color: #e8edf4; border: 1px solid #3a4252; border-radius: 6px; padding: 3px 6px; }
 #panel select { flex: 1; }

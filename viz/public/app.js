@@ -1002,18 +1002,18 @@ function render() {
     const t0 = f.t0 + delay;
     const t1 = f.t1 + delay;
     // ghost: where this held flight would be in the baseline (no-GDP) timeline
-    if (gdpOn && delay > 0 && state.t >= f.t0 && state.t <= f.t1) {
-      const gf = (state.t - f.t0) / (f.t1 - f.t0);
+    if (gdpOn && delay > 0 && dt >= f.t0 && dt <= f.t1) {
+      const gf = (dt - f.t0) / (f.t1 - f.t0);
       ghosts.push({ position: positionAt(f, gf), f });
     }
-    if (state.t < t0 || state.t > t1) continue;
+    if (dt < t0 || dt > t1) continue;
     nAir++;
     activeIcaos.add(f.o);
     activeIcaos.add(f.d);
-    const conf = inConflict(f, k);
+    const conf = inConflict(f, k); // predicted in-storm at the forecast strip
     if (conf) nConf++;
     if (o.conflictsOnly && !conf) continue;
-    const frac = (state.t - t0) / (t1 - t0);
+    const frac = (dt - t0) / (t1 - t0);
     const [lon, lat] = positionAt(f, frac);
     f._pos = [lon, lat];
     // heading: bearing between a point just behind and just ahead on the route
@@ -1431,7 +1431,8 @@ function render() {
     },
   });
 
-  document.getElementById("clock").textContent = fmtClock(state.t);
+  document.getElementById("clock").textContent =
+    fmtClock(state.t) + (o.horizon ? `  ▶ +${o.horizon}m forecast` : "");
   document.getElementById("time").value = state.t;
   const stats = document.getElementById("stats");
   stats.innerHTML =
