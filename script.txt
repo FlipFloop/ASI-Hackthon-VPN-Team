@@ -1,0 +1,122 @@
+A. Rerouting algorithms (the headline)
+
+  1. No-fly-zone reroute — visibility graph + Dijkstra
+
+  What: draw a keep-out box → every flight crossing it flies around (or is grounded if its
+  origin/destination is inside).
+  How: for each affected flight it finds where the route enters/exits the box, builds a tiny
+  visibility graph (the entry point, exit point, and the 4 slightly-inflated corners of the
+  box), connects any two nodes whose straight line doesn't clip the box (Liang–Barsky
+  segment-box clip test), and runs Dijkstra for the shortest way around. The detour is
+  stitched back into the original route.
+  Lives in: app.js → rerouteAround / shortestAround / segHitsBox.
+  Demo line: "Draw a box over Chicago — every flight instantly reroutes around it,
+  shortest-path."
+
+  2. Plan-around-weather — reroute, else hold
+
+  What: the forecast version — a flight that foresees storms on its path flies around them,
+  or holds if it can't.
+  How: storms are turned into keep-out boxes (see D2); for each weather-affected flight it
+  chains the reroute above across every storm box on its path. If the destination is under
+  the storm or it's boxed in → it's classified hold.
+  Lives in: app.js → planAroundWeather / applyWxPlan.
+  Demo line: "Turn on Plan-around-weather: 75 reroute around the storms, 71 must hold —
+  here's the fuel bill."
+
+  ▎ Note for accuracy in the demo: the in-browser router is a fast visibility-graph
+  ▎ approximation. The toolkit ships a heavier A* router (autoroute.py) that searches a
+  ▎ lat/lon grid with tunable cost weights (distance + traffic congestion + a safety buffer
+  ▎ around the hazard + a turn-smoothness penalty). The viz reuses that toolkit's cost model
+  ▎ but not its A* — say "grid A* is the production router; the map uses a fast equivalent."
+
+  ---
+  B. Cost models (what every reroute is priced with)
+
+  3. Detour fuel cost — ported from the toolkit
+
+  What: turns extra nautical miles into extra fuel (kg) → $ → CO₂.
+  How: extra_kg = extra_nm / speed × burn, $ = kg / 3.04 × fuel_price, CO₂ = kg × 3.16. The
+  burn rate comes from a piecewise-linear curve keyed on cruise speed (turboprop ~350 kg/hr →
+  widebody ~3,300 kg/hr — speed is the only aircraft-size signal in the data).
+  Lives in: app.js → priceDetour / burnKgHr (mirrors holdcost.burn_kghr +
+  autoroute._package).
+  Demo line: "Same constants as the toolkit, so the map and the algorithm agree to the
+  dollar."
+
+  4. Live fuel price
+
+  What: the price driving every cost number is the real market price, not a constant.
+  How: serve.py /api/fuel proxies ULSD/NY-Harbor front-month futures (the jet-fuel hedging
+  proxy) + a jet differential; the page auto-pulls it on load, with a slider to override.
+  Demo line: "It pulled $3.67/gal live — slide fuel up and watch every decision change."
+
+  ---
+  C. Congestion & delay (air-vs-ground decision)
+
+  5. AAR arrival metering — single-server queue / Ration-by-Schedule
+
+  What: an airport can only land so many planes per hour (the Acceptance Rate). Reroutes
+  bunch arrivals → a queue forms → planes must wait.
+  How: sort arrivals by ETA, meter them one slot every 3600/AAR seconds (FAA
+  Ration-by-Schedule); the gap between your ETA and your slot is your hold.
+  Lives in: app.js → meterSlots / meterArrivals (ported from holdcost.py).
+
+  6. CDM substitution — cost-optimal slot swap, decided by live fuel
+
+  What: this is the "circle vs stay on the ground" decision. A held plane can wait in the air
+  (circling burns cruise fuel — expensive, and past a 45-min reserve it's a diversion risk)
+  or at the gate (burns ~nothing). CDM lets an airline reshuffle its own flights across its
+  own slots so the cheap/gate-holdable planes absorb the wait and the expensive jets land on
+  time.
+  How: within each carrier, airborne flights grab the earliest feasible slots (they're
+  already burning), gate-holdable flights take the latest; price each hold by burn × live
+  fuel.
+  Lives in: app.js → assignCheapest / holdFuelKg.
+  Demo line: "Same total delay, fair within each airline — but it cuts diversion risk 31→5
+  and saves real money, because it's priced in live fuel."
+
+  7. GDP (Ground Delay Program) — iterative sector-capacity rationing
+
+  What: the "GDP" scenario — precomputed ground delays that keep sectors under capacity.
+  How: loop — find the worst over-demand sector, give ground delays in schedule order so it
+  stops overflowing, repeat until no sector is over (airborne flights can't be delayed, so
+  some are unresolvable).
+  Lives in: viz/gdp.py (offline) → gdp.json.
+
+  ---
+  D. Weather algorithms
+
+  8. Weather conflict detection (cf)
+
+  What: which flights actually hit impassable weather.
+  How: offline, sample each flight's position at every 15-min forecast strip; it's "in
+  weather" when local reflectivity ≥ 40 dBZ AND echo-top ≥ the flight's altitude (can't climb
+  over it).
+  Lives in: preprocess.py → per-flight cf strip intervals.
+
+  9. Storm-reduced sector capacity
+
+  What: storms shrink how many planes a sector can safely hold.
+  How: per sector/timestep, severity = blend of intensity (maxdBZ−40)/15 and coverage (heavy
+  cells/6); capacity loss = 0.30 + 0.70·severity (30–100%); effective capacity = normal × (1
+  − loss). (That LOW_122 ⛈ 9/4 over you saw is this in action.)
+  Lives in: preprocess_sectors.py compute_stormcap → effCap/stormRed in app.js.
+
+  10. Storm keep-out boxes (for plan-around-weather)
+
+  What: turning the storm raster into shapes a router can avoid.
+  How: take all ≥40 dBZ cells per strip, cluster them on a coarse grid via connected
+  components (flood-fill), emit each cluster's padded bounding box.
+  Lives in: preprocess_sectors.py compute_storm_boxes → storm_boxes.json.
+
+  ---
+  E. Supporting algorithms
+  flights that will hit a storm light up in advance (dispTime).
+  - Sector demand recompute — point-in-polygon (ray-cast) with a 1° grid spatial index,
+  recomputed live from rerouted routes (computeDemandFromRoutes / findSector).
+  - AI chatbot — plain-English what-ifs ("no-fly zone over Atlanta") run the real engine via
+  two tool adapters (simulate_no_fly_zone, analyze_hub) and narrate the actual numbers — it
+  never invents a figure.
+
+  ---
