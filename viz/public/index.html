@@ -53,9 +53,23 @@
           ><input type="checkbox" id="ly-motion-trails" /> Plane trails</label
         >
         <label
-          ><input type="checkbox" id="ly-trails" /> Show route of hovered</label
+          ><input type="checkbox" id="ly-trails" /> Show route of clicked</label
+        >
+        <label
+          ><input type="checkbox" id="ly-stormcap" checked /> Storm-reduced
+          capacity</label
         >
       </div>
+
+      <label class="row">
+        <span>Forecast</span>
+        <select id="horizon">
+          <option value="0" selected>Now</option>
+          <option value="30">+30 min</option>
+          <option value="60">+60 min</option>
+          <option value="90">+90 min</option>
+        </select>
+      </label>
 
       <label class="row">
         <span>Airports</span>
@@ -117,6 +131,9 @@
           sectors: <span class="swatch s-ok"></span> ok
           <span class="swatch s-warn"></span> near
           <span class="swatch s-over"></span> over capacity
+        </div>
+        <div class="sec-legend">
+          <span class="swatch s-storm"></span> storm-reduced capacity (⛈ in list)
         </div>
       </div>
     </div>

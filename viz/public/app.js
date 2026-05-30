@@ -64,7 +64,10 @@ const state = {
     scenario: "baseline", // "baseline" | "gdp"
     airports: "off", // "off" | "hubs" | "active" — markers from route endpoints
     wxOpacity: 0.7,
+    horizon: 0, // forecast preview, minutes ahead (0 | 30 | 60 | 90)
+    stormCap: true, // weather cuts sector capacity (storm-reduced capacity)
   },
+  stormcap: null, // { HIGH:{name:[red/step]}, LOW:{...} } — capacity reduction
   trips: null, // static TripsLayer data for current snapshot
   dock: "sectors", // active tab: "conflicts" | "sectors" (dock is always present)
   dockCollapsed: false,
@@ -376,26 +379,40 @@ function computeDemandFromRoutes() {
     LOW: out.LOW,
   };
 }
-// how many sectors ever exceed capacity across the whole window
+// how many sectors ever exceed (storm-adjusted) capacity across the window
 function peakOverCount(demand) {
   let n = 0;
   for (const band of ["HIGH", "LOW"])
     for (const name in demand[band]) {
-      let mx = 0;
-      for (const v of demand[band][name]) if (v > mx) mx = v;
-      if (mx > state.capByName[name]) n++;
+      const row = demand[band][name];
+      let over = false;
+      for (let step = 0; step < row.length; step++)
+        if (row[step] > effCap(band, name, step)) {
+          over = true;
+          break;
+        }
+      if (over) n++;
     }
   return n;
 }
 
-// current weather strip index for time t
-function currentStrip() {
+// forecast horizon: preview weather + sector demand this many minutes ahead of
+// the real clock (flights stay at "now"). 0 = live. Mirrors App's Now/+30/+60/+90.
+function dispTime() {
+  return state.t + (state.opts.horizon || 0) * 60;
+}
+
+// weather strip index valid at time t
+function stripAt(t) {
   const s = state.snap.strips;
   for (let k = 0; k < s.length; k++) {
-    if (state.t >= s[k].from && state.t < s[k].to) return k;
+    if (t >= s[k].from && t < s[k].to) return k;
   }
-  if (state.t < s[0].from) return 0;
+  if (t < s[0].from) return 0;
   return s.length - 1;
+}
+function currentStrip() {
+  return stripAt(state.t);
 }
 
 function inConflict(f, k) {
@@ -403,10 +420,10 @@ function inConflict(f, k) {
   return false;
 }
 
-// current demand step index for time t
+// demand/storm step index for the forecast-shifted display time
 function currentStep() {
   const d = state.demand;
-  const k = Math.floor((state.t - d.grid_start) / d.interval);
+  const k = Math.floor((dispTime() - d.grid_start) / d.interval);
   return Math.max(0, Math.min(d.n_steps - 1, k));
 }
 
@@ -420,6 +437,19 @@ function demandSource() {
 function sectorDemand(band, name, step) {
   const row = demandSource()[band][name];
   return row ? row[step] : 0;
+}
+
+// storm capacity-reduction factor (0..1) for a sector at a step (0 if none / off)
+function stormRed(band, name, step) {
+  if (!state.opts.stormCap || !state.stormcap) return 0;
+  const row = state.stormcap[band] && state.stormcap[band][name];
+  return row ? row[step] || 0 : 0;
+}
+// effective capacity = static capacity cut by any storm overhead at that step
+function effCap(band, name, step) {
+  const cap = state.capByName[name] || 0;
+  const red = stormRed(band, name, step);
+  return red > 0 ? Math.max(0, Math.round(cap * (1 - red))) : cap;
 }
 
 // green -> yellow -> orange -> red as demand approaches/exceeds capacity
@@ -620,6 +650,10 @@ async function loadSnapshot(i) {
   state.demand = await (
     await fetch(`${DATA}/${meta.id}/sectors_demand.json`)
   ).json();
+  // storm-reduced capacity (optional — only if preprocess_sectors.py wrote it)
+  state.stormcap = await fetch(`${DATA}/${meta.id}/sectors_stormcap.json`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
   // GDP scenario data (optional — only present if gdp.py has been run)
   state.gdpDemand = await fetch(`${DATA}/${meta.id}/sectors_demand_gdp.json`)
     .then((r) => (r.ok ? r.json() : null))
@@ -940,8 +974,9 @@ function wxImage(path) {
 
 function render() {
   if (!state.snap) return;
-  const k = currentStrip();
-  const strip = state.snap.strips[k];
+  const k = currentStrip(); // real-time strip — for flight in-weather status
+  const wxStrip = state.snap.strips[stripAt(dispTime())]; // forecast-shifted raster
+  const strip = wxStrip;
   const o = state.opts;
   const bounds = [
     state.grid.lon_min,
@@ -1066,8 +1101,9 @@ function render() {
     const feats = state.sectorsByBand[band];
     for (const f of feats) {
       const c = sectorDemand(band, f.properties.name, step);
-      if (c > f.properties.capacity) nOver++;
+      if (c > effCap(band, f.properties.name, step)) nOver++;
     }
+    const trig = [state.t, band, o.scenario, o.horizon, o.stormCap];
     layers.push(
       new GeoJsonLayer({
         id: "sectors",
@@ -1078,21 +1114,26 @@ function render() {
         getFillColor: (f) =>
           sectorFill(
             sectorDemand(band, f.properties.name, step),
-            f.properties.capacity,
+            effCap(band, f.properties.name, step),
           ),
-        getLineColor: (f) =>
-          sectorDemand(band, f.properties.name, step) > f.properties.capacity
-            ? [255, 90, 90, 255]
-            : [120, 140, 170, 90],
-        getLineWidth: (f) =>
-          sectorDemand(band, f.properties.name, step) > f.properties.capacity
-            ? 2
-            : 0.5,
+        // violet edge = storm-reduced capacity; red = over capacity (App palette)
+        getLineColor: (f) => {
+          const nm = f.properties.name;
+          if (sectorDemand(band, nm, step) > effCap(band, nm, step))
+            return [255, 90, 90, 255];
+          if (stormRed(band, nm, step) > 0) return [199, 125, 255, 200];
+          return [120, 140, 170, 90];
+        },
+        getLineWidth: (f) => {
+          const nm = f.properties.name;
+          if (sectorDemand(band, nm, step) > effCap(band, nm, step)) return 2;
+          return stormRed(band, nm, step) > 0 ? 1.5 : 0.5;
+        },
         lineWidthUnits: "pixels",
         updateTriggers: {
-          getFillColor: [state.t, band, o.scenario],
-          getLineColor: [state.t, band, o.scenario],
-          getLineWidth: [state.t, band, o.scenario],
+          getFillColor: trig,
+          getLineColor: trig,
+          getLineWidth: trig,
         },
         onHover,
         onClick: (info) => {
@@ -1363,13 +1404,21 @@ function render() {
       }
       if (object.properties && object.properties.band) {
         const p = object.properties;
-        const c = sectorDemand(p.band, p.name, currentStep());
-        const over = c > p.capacity;
+        const step = currentStep();
+        const c = sectorDemand(p.band, p.name, step);
+        const cap = effCap(p.band, p.name, step);
+        const red = stormRed(p.band, p.name, step);
+        const over = c > cap;
         return {
           className: "tooltip",
           html:
             `<b>${p.name}</b><br>` +
-            `demand ${c} / capacity ${p.capacity}` +
+            `demand ${c} / capacity ${cap}` +
+            (red > 0
+              ? `<br><span style="color:#c77dff">storm-reduced ${Math.round(
+                  red * 100,
+                )}% (was ${p.capacity})</span>`
+              : "") +
             (over
               ? `<br><span style="color:#ff6b6b">over capacity</span>`
               : ""),
@@ -1558,8 +1607,9 @@ function renderSectorList() {
   const rows = state.sectorsByBand[band]
     .map((f) => ({
       f,
-      cap: f.properties.capacity,
+      cap: effCap(band, f.properties.name, step),
       dem: sectorDemand(band, f.properties.name, step),
+      storm: stormRed(band, f.properties.name, step) > 0,
     }))
     .sort(SECTOR_SORTS[state.dockSort] || SECTOR_SORTS.demand);
   const sortLinks = Object.keys(SORT_LABELS)
@@ -1578,7 +1628,7 @@ function renderSectorList() {
     const over = r.dem > r.cap;
     html +=
       `<div class="rd-row" data-i="${i}"><b>${r.f.properties.name}</b>` +
-      `<span class="rd-sub ${over ? "over" : ""}">${r.dem} / ${r.cap}${over ? " over" : ""}</span></div>`;
+      `<span class="rd-sub ${over ? "over" : ""}">${r.storm ? "⛈ " : ""}${r.dem} / ${r.cap}${over ? " over" : ""}</span></div>`;
   });
   el.innerHTML = html;
   el.querySelectorAll(".rd-bandtoggle a").forEach((a) => {
