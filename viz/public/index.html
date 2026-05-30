@@ -138,6 +138,51 @@
       </div>
     </div>
 
+    <section id="chat" aria-label="Airspace what-if assistant">
+      <div id="chat-head">
+        <h2>Ask the airspace assistant</h2>
+        <button
+          id="chat-collapse"
+          type="button"
+          aria-expanded="true"
+          aria-controls="chat-body"
+          title="collapse"
+        >
+          –
+        </button>
+      </div>
+      <div id="chat-body">
+        <p class="chat-note">
+          Describe a scenario in plain English. Answers are what-if estimates
+          from the map's engine, not forecasts.
+        </p>
+        <div
+          id="chat-log"
+          role="log"
+          aria-live="polite"
+          aria-label="Conversation transcript"
+        ></div>
+        <div id="chat-chips" aria-label="Example prompts">
+          <button class="chip" type="button">No-fly zone over Chicago</button>
+          <button class="chip" type="button">No-fly zone over Denver</button>
+          <button class="chip" type="button">Storm over Atlanta at $6 fuel</button>
+          <button class="chip" type="button">Congestion at Newark</button>
+        </div>
+        <form id="chat-form">
+          <label class="chat-label" for="chat-input">Describe a scenario</label>
+          <div class="chat-inputrow">
+            <textarea
+              id="chat-input"
+              rows="2"
+              placeholder="e.g. No-fly zone over Chicago — what happens to flights?"
+            ></textarea>
+            <button id="chat-send" type="submit">Send</button>
+          </div>
+          <p id="chat-status" class="chat-status" role="status" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
+
     <div id="timebar">
       <button id="play">PLAY</button>
       <input type="range" id="time" min="0" max="1000" value="0" />
@@ -157,5 +202,6 @@
     </div>
 
     <script src="app.js"></script>
+    <script src="chat.js"></script>
   </body>
 </html>

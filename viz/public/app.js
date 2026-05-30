@@ -876,6 +876,7 @@ function applyNFZ(box) {
     extraKgTot = 0, // extra fuel burned (kg)
     extraUsdTot = 0, // extra fuel cost ($)
     extraCo2Tot = 0; // extra CO2 (kg)
+  const worst = []; // per-flight detour rows, for the chatbot's "hardest hit" list
   const impacted = new Set(); // destination airports the zone disrupts
   for (const f of state.flights) {
     const n = f.la.length;
@@ -907,6 +908,13 @@ function applyNFZ(box) {
     extraKgTot += c.kg;
     extraUsdTot += c.usd;
     extraCo2Tot += c.co2;
+    worst.push({
+      fn: f.fn,
+      o: f.o,
+      d: f.d,
+      extra_nm: Math.round(extraNm),
+      extra_usd: Math.round(c.usd),
+    });
     f._orig = { la: f.la, lo: f.lo, cum: f.cum, t1: f.t1 };
     f.la = rr.la;
     f.lo = rr.lo;
@@ -944,6 +952,7 @@ function applyNFZ(box) {
     extraFuelKg: Math.round(extraKgTot),
     extraFuelUsd: Math.round(extraUsdTot),
     extraCo2Kg: Math.round(extraCo2Tot),
+    worstFlights: worst.sort((a, b) => b.extra_usd - a.extra_usd).slice(0, 5),
     fuelUsdGal: state.fuelUsdGal,
     // AAR arrival-hold (live-fuel-priced air-vs-gate decision)
     aar: state.aar,
@@ -962,6 +971,99 @@ function applyNFZ(box) {
 function clearNFZ() {
   applyNFZ(null);
 }
+
+// ---------- AI chat: browser-side tool adapters ----------
+// The chatbot drives the SAME in-browser engine the manual controls do. Each
+// adapter runs a real scenario and returns a compact JSON the model narrates —
+// so every number in a reply provably came from the engine, never invented.
+function nmToBox(lat, lon, radiusNm) {
+  const dLat = radiusNm / 60; // 1 nm = 1/60 degree of latitude
+  const dLon =
+    radiusNm / 60 / Math.max(Math.cos((lat * Math.PI) / 180), 0.01);
+  return { w: lon - dLon, e: lon + dLon, s: lat - dLat, n: lat + dLat };
+}
+window.AIRSPACE = {
+  // current jet-fuel price the engine is using (live feed or manual)
+  fuelPrice() {
+    const el = document.getElementById("fuel-src");
+    return {
+      usd_per_gal: state.fuelUsdGal,
+      source: el ? el.textContent : "manual",
+    };
+  },
+  // ground a fuzzy place to an airport's real coordinates when it's an ICAO
+  airportPos(icao) {
+    const a = state.airportByIcao.get((icao || "").toUpperCase());
+    return a ? { icao: a.icao, lat: a.lat, lon: a.lon } : null;
+  },
+  // TOOL 1: apply a keep-out zone and report the fleet-wide impact
+  simulate_no_fly_zone({
+    center_lat,
+    center_lon,
+    place_name,
+    radius_nm = 60,
+    fuel_usd_per_gal,
+  }) {
+    if (!isFinite(center_lat) || !isFinite(center_lon))
+      return { error: "center_lat and center_lon are required numbers" };
+    if (isFinite(fuel_usd_per_gal)) setFuelPrice(+fuel_usd_per_gal, "manual");
+    const box = nmToBox(center_lat, center_lon, radius_nm);
+    applyNFZ(box); // reroutes/grounds the fleet, prices it, redraws the map
+    map.easeTo({ center: [center_lon, center_lat], zoom: 5, duration: 800 });
+    const s = state.nfzStats || {};
+    return {
+      place_name: place_name || "the area",
+      radius_nm,
+      flights_rerouted: s.rerouted || 0,
+      flights_grounded: s.grounded || 0,
+      total_extra_nm: s.extraNm || 0,
+      total_extra_fuel_usd: s.extraFuelUsd || 0,
+      total_extra_co2_tonnes: Math.round((s.extraCo2Kg || 0) / 100) / 10,
+      added_reroute_delay_min: s.addedDelayMin || 0,
+      airports_closed: s.airportsClosed || 0,
+      sectors_over_capacity_before: s.overBefore || 0,
+      sectors_over_capacity_after: s.overAfter || 0,
+      arrival_hold_extra_usd: s.aarHoldUsdExtra || 0,
+      cdm_savings_usd: s.cdmSaveUsd || 0,
+      diversion_risk_flights: s.divRbs || 0,
+      worst_flights: s.worstFlights || [],
+      worst_flights_capped_at: 5,
+      fuel_usd_per_gal: state.fuelUsdGal,
+    };
+  },
+  // TOOL 2: congestion / weather cost of metering arrivals at one hub
+  analyze_hub({ hub, weather_severity = 1.0, base_aar = 55, fuel_usd_per_gal }) {
+    hub = (hub || "").toUpperCase();
+    if (!hub) return { error: "hub (ICAO code) is required" };
+    if (isFinite(fuel_usd_per_gal)) setFuelPrice(+fuel_usd_per_gal, "manual");
+    const arrivals = state.flights.filter((f) => f.d === hub);
+    if (!arrivals.length)
+      return { error: `no flights arriving at ${hub} in this snapshot`, hub };
+    // worse weather throttles the landing rate (acceptance rate)
+    const aar = Math.max(
+      1,
+      Math.round(base_aar / Math.max(weather_severity, 0.1)),
+    );
+    const m = meterArrivals(arrivals, (f) => f.t1, aar);
+    const a = state.airportByIcao.get(hub);
+    if (a) map.easeTo({ center: [a.lon, a.lat], zoom: 6, duration: 800 });
+    return {
+      hub,
+      arrivals_metered: arrivals.length,
+      base_aar,
+      weather_severity,
+      effective_aar: aar,
+      congestion_hold_usd: Math.round(m.rbsUsd),
+      cdm_savings_usd: Math.round(m.rbsUsd - m.subUsd),
+      cdm_savings_co2_tonnes: Math.round((m.rbsCo2 - m.subCo2) / 100) / 10,
+      air_hold_min: Math.round(m.airMin),
+      gate_hold_min: Math.round(m.gateMin),
+      diversion_risk_flights: m.divRbs,
+      diversion_risk_after_cdm: m.divSub,
+      fuel_usd_per_gal: state.fuelUsdGal,
+    };
+  },
+};
 
 // ---------- rendering ----------
 let imageCache = {};
