@@ -120,6 +120,22 @@ class Handler(SimpleHTTPRequestHandler):
             return self._feed()
         return super().do_GET()
 
+    def do_POST(self):
+        if self.path.split("?")[0] == "/api/chat":
+            return self._chat()
+        self.send_error(404)
+
+    def _chat(self):
+        # browser owns the tool-use loop; we run ONE model turn and return it raw.
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}")
+            import chat_backend
+            out = chat_backend.run_turn(req.get("messages", []))
+        except Exception as e:
+            out = {"error": f"{type(e).__name__}: {e}"}
+        self._send_json(out)
+
     def _send_json(self, obj):
         body = json.dumps(obj).encode()
         self.send_response(200)

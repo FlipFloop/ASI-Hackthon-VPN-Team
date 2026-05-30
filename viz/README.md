@@ -24,6 +24,32 @@ and weather conflicts, built from the hackathon data bundle.
 ./serve.sh                                  # http://localhost:8765/index.html
 ```
 
+## AI chatbot
+
+A docked chat panel turns plain-English what-ifs — *"no-fly zone over Chicago,
+what happens to flights?"* — into a real run of the engine, redraws the map, and
+replies with an accessible, key-impact-first summary. The AI only **extracts the
+parameters** and **narrates the real numbers**; it never invents a figure.
+
+It's client-driven: the tools execute in the browser against the in-page engine
+(`window.AIRSPACE` in `app.js`, over `applyNFZ` / `meterArrivals`), and `serve.py`
+exposes a thin, stateless Claude proxy at `POST /api/chat` (model `claude-opus-4-8`,
+prompt caching on the system prompt + tool schemas).
+
+**Requires an Anthropic API key in the environment** — start the server with it set:
+
+```bash
+ANTHROPIC_API_KEY=sk-... ./serve.sh         # the key never reaches the browser
+```
+
+`serve.sh` runs the data-bundle venv's Python, which has the `anthropic` package.
+Without a key the map still works; only the chat is disabled (it returns a clear
+message saying so).
+
+See **[AIChatbotGUIDE.md](AIChatbotGUIDE.md)** for the full workflow, the two tools
+(`simulate_no_fly_zone`, `analyze_hub`), the system-prompt rules, accessibility
+notes, and how to add a new tool.
+
 ## Deep links
 
 `?snap=<i>&t=<0..1>&sectors=HIGH|LOW&arrows=1&trails=1` — pick snapshot, set time
