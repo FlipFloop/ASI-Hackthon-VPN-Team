@@ -758,6 +758,7 @@ function render() {
   const gdpOn = o.scenario === "gdp";
   const pts = [];
   const ghosts = []; // baseline positions of held flights (where they'd be sans GDP)
+  const activeIcaos = new Set(); // airports of flights airborne right now
   let nAir = 0,
     nConf = 0;
   for (const f of state.flights) {
@@ -772,6 +773,8 @@ function render() {
     }
     if (state.t < t0 || state.t > t1) continue;
     nAir++;
+    activeIcaos.add(f.o);
+    activeIcaos.add(f.d);
     const conf = inConflict(f, k);
     if (conf) nConf++;
     if (o.conflictsOnly && !conf) continue;
@@ -1050,26 +1053,43 @@ function render() {
   // airports (derived from route endpoints): "active" = all in this snapshot,
   // "hubs" = busiest 30 by traffic. Labels show the busiest.
   if (o.airports !== "off" && state.airports) {
-    const aps =
+    // "hubs" = busiest 30 (whole window); "active" = airports of flights
+    // airborne right now. Closed airports (inside the zone) are always shown.
+    let aps =
       o.airports === "hubs"
         ? state.airports
             .slice()
             .sort((a, b) => b.n - a.n)
             .slice(0, 30)
-        : state.airports;
+        : state.airports.filter((a) => activeIcaos.has(a.icao));
+    if (state.nfz) {
+      const have = new Set(aps.map((a) => a.icao));
+      for (const a of state.airports)
+        if (a.closed && !have.has(a.icao)) aps.push(a);
+    }
+    const airportColor = (d) =>
+      d.closed
+        ? [255, 70, 70, 245]
+        : d.cancelled > 0
+          ? [245, 160, 40, 245]
+          : [240, 240, 250, 230];
     layers.push(
       new ScatterplotLayer({
         id: "airports",
         data: aps,
         pickable: true,
         getPosition: (d) => [d.lon, d.lat],
-        getRadius: 4,
+        getRadius: (d) => (d.closed || d.cancelled > 0 ? 5 : 4),
         radiusUnits: "pixels",
         radiusMinPixels: 2.5,
         stroked: true,
         lineWidthMinPixels: 1,
         getLineColor: [30, 30, 40, 255],
-        getFillColor: [240, 240, 250, 230],
+        getFillColor: airportColor,
+        updateTriggers: {
+          getFillColor: [state.nfz, state.t],
+          getRadius: [state.nfz, state.t],
+        },
         onHover,
       }),
     );
@@ -1126,10 +1146,12 @@ function render() {
     getTooltip: ({ object }) => {
       if (!object) return null;
       if (object.icao) {
-        return {
-          className: "tooltip",
-          html: `<b>${object.icao}</b><br>${object.dep} dep · ${object.arr} arr`,
-        };
+        let html = `<b>${object.icao}</b><br>${object.dep} dep · ${object.arr} arr`;
+        if (object.closed)
+          html += `<br><span style="color:#ff6b6b">closed (in no-fly zone)</span>`;
+        else if (object.cancelled > 0)
+          html += `<br><span style="color:#f0a040">${object.cancelled} cancelled</span>`;
+        return { className: "tooltip", html };
       }
       if (object.f) {
         return {
@@ -1138,7 +1160,7 @@ function render() {
             `<b>${object.f.fn}</b> ${object.f.o}→${object.f.d}<br>` +
             `alt ${object.f.alt.toLocaleString()} ft · ${object.f.spd} kt<br>` +
             (object.conf
-              ? `<span style="color:#ff6b6b">⚠ in impassable weather</span>`
+              ? `<span style="color:#ff6b6b">in impassable weather</span>`
               : `dep ${fmtClock(object.f.t0)}`),
         };
       }
@@ -1152,7 +1174,7 @@ function render() {
             `<b>${p.name}</b><br>` +
             `demand ${c} / capacity ${p.capacity}` +
             (over
-              ? `<br><span style="color:#ff6b6b">⚠ over capacity</span>`
+              ? `<br><span style="color:#ff6b6b">over capacity</span>`
               : ""),
         };
       }
@@ -1192,12 +1214,12 @@ function play() {
   if (state.t >= state.snap.window_end) state.t = state.snap.window_start;
   state.playing = true;
   state.lastFrame = null;
-  document.getElementById("play").textContent = "⏸";
+  document.getElementById("play").textContent = "II";
   requestAnimationFrame(tick);
 }
 function stop() {
   state.playing = false;
-  document.getElementById("play").textContent = "▶";
+  document.getElementById("play").textContent = "PLAY";
 }
 
 // ---------- no-fly-zone draw interaction ----------
@@ -1359,7 +1381,7 @@ function renderSectorList() {
     const over = r.dem > r.cap;
     html +=
       `<div class="rd-row" data-i="${i}"><b>${r.f.properties.name}</b>` +
-      `<span class="rd-sub ${over ? "over" : ""}">${r.dem} / ${r.cap}${over ? " ⚠" : ""}</span></div>`;
+      `<span class="rd-sub ${over ? "over" : ""}">${r.dem} / ${r.cap}${over ? " over" : ""}</span></div>`;
   });
   el.innerHTML = html;
   el.querySelectorAll(".rd-bandtoggle a").forEach((a) => {
