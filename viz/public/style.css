@@ -64,6 +64,9 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, san
 .gdp-box { margin-top: 8px; padding: 7px 9px; background: rgba(120,150,255,0.12);
   border: 1px solid #3a4a6a; border-radius: 6px; font-size: 11px; line-height: 1.5; color: #cdd8ea; }
 .ghost-note { color: #8a93a6; font-style: italic; }
+.wx-box { margin-top: 8px; padding: 7px 9px; background: rgba(255,170,40,0.1);
+  border: 1px solid #6a5330; border-radius: 6px; font-size: 11px; line-height: 1.5; color: #f0e0c8; }
+.dot.wx-affected { background: #ffaa28; }
 .nfz-box { margin-top: 8px; padding: 7px 9px; background: rgba(255,80,80,0.12);
   border: 1px solid #6a3a3a; border-radius: 6px; font-size: 11px; line-height: 1.5; color: #f0cdcd; }
 .nfz-cost { color: #ffd9a0; font-weight: 600; }

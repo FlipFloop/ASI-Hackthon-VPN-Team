@@ -66,8 +66,10 @@ const state = {
     wxOpacity: 0.7,
     horizon: 0, // forecast preview, minutes ahead (0 | 30 | 60 | 90)
     stormCap: true, // weather cuts sector capacity (storm-reduced capacity)
+    wxAffected: false, // highlight every flight whose route crosses a storm
   },
   stormcap: null, // { HIGH:{name:[red/step]}, LOW:{...} } — capacity reduction
+  wxImpact: null, // per-snapshot weather impact tally (affected flights, minutes)
   trips: null, // static TripsLayer data for current snapshot
   dock: "sectors", // active tab: "conflicts" | "sectors" (dock is always present)
   dockCollapsed: false,
@@ -469,8 +471,28 @@ function updateMeta() {
   const meta = state.snap;
   let html =
     `as-of <b>${fmtClock(meta.asked_at)}</b><br>` +
-    `window ${fmtClock(meta.window_start)}<br>→ ${fmtClock(meta.window_end)}<br>` +
-    `<b>${meta.n_conflict}</b> flights hit weather`;
+    `window ${fmtClock(meta.window_start)}<br>→ ${fmtClock(meta.window_end)}`;
+  // overall weather effects for this snapshot
+  const wi = state.wxImpact;
+  if (wi) {
+    const pct = wi.total ? Math.round((wi.affected / wi.total) * 100) : 0;
+    const stormSecs = state.stormcap
+      ? Object.keys(state.stormcap.HIGH).length +
+        Object.keys(state.stormcap.LOW).length
+      : 0;
+    const hrs = (wi.wxMin / 60).toLocaleString("en-US", {
+      maximumFractionDigits: 0,
+    });
+    html +=
+      `<div class="wx-box"><b>Weather impact</b><br>` +
+      `<b>${wi.affected.toLocaleString()}</b> / ${wi.total.toLocaleString()} flights ` +
+      `(${pct}%) route through storms<br>` +
+      `~${hrs} flight-hours in ≥40 dBZ` +
+      (stormSecs
+        ? `<br><b>${stormSecs}</b> sectors lose capacity to storms`
+        : "") +
+      `</div>`;
+  }
   if (state.opts.scenario === "gdp" && state.gdp) {
     const g = state.gdp;
     html +=
@@ -618,6 +640,22 @@ async function loadSnapshot(i) {
     ...f,
     cum: buildCumulative(f.la, f.lo),
   }));
+  // overall weather impact for this snapshot (static — cf is route-wide).
+  // affected = route crosses impassable weather; wxMin ≈ flight-minutes in storms
+  // (each conflict strip is a 15-min window).
+  let wxAffectedN = 0,
+    wxMin = 0;
+  for (const f of state.flights) {
+    if (f.cf && f.cf.length) {
+      wxAffectedN++;
+      for (const [a, b] of f.cf) wxMin += (b - a + 1) * 15;
+    }
+  }
+  state.wxImpact = {
+    total: state.flights.length,
+    affected: wxAffectedN,
+    wxMin,
+  };
   // airport locations derived from route endpoints (origin = first waypoint,
   // destination = last waypoint), keyed by ICAO, with traffic counts
   const ap = new Map();
@@ -1012,6 +1050,7 @@ function render() {
     activeIcaos.add(f.d);
     const conf = inConflict(f, k); // predicted in-storm at the forecast strip
     if (conf) nConf++;
+    const affected = f.cf && f.cf.length > 0; // route crosses a storm at some point
     if (o.conflictsOnly && !conf) continue;
     const frac = (dt - t0) / (t1 - t0);
     const [lon, lat] = positionAt(f, frac);
@@ -1021,7 +1060,7 @@ function render() {
     const a = positionAt(f, Math.max(0, frac - df));
     const b = positionAt(f, Math.min(1, frac + df));
     const bearing = bearingDeg(a[1], a[0], b[1], b[0]);
-    pts.push({ f, position: [lon, lat], conf, bearing });
+    pts.push({ f, position: [lon, lat], conf, bearing, affected });
   }
   state.conflictPts = pts.filter((p) => p.conf);
 
@@ -1036,12 +1075,14 @@ function render() {
   };
   const DIM = 30;
   const flightColor = (d) => {
-    const c = d.conf
-      ? [255, 59, 59]
-      : d.f.alt >= 35000
-        ? [77, 163, 255]
-        : [70, 211, 154];
-    return hl && d.f !== hl ? [c[0], c[1], c[2], DIM] : [c[0], c[1], c[2], 255];
+    let c;
+    if (d.conf) c = [255, 59, 59]; // in storm now/forecast — red
+    else if (o.wxAffected && d.affected) c = [255, 170, 40]; // route hits a storm — amber
+    else c = d.f.alt >= 35000 ? [77, 163, 255] : [70, 211, 154];
+    let alpha = 255;
+    if (hl && d.f !== hl) alpha = DIM;
+    else if (o.wxAffected && !d.affected && !d.conf) alpha = 55; // fade the unaffected
+    return [c[0], c[1], c[2], alpha];
   };
 
   const layers = [];
@@ -1245,7 +1286,7 @@ function render() {
         getColor: flightColor,
         updateTriggers: {
           getAngle: state.t,
-          getColor: [state.t, hl],
+          getColor: [state.t, hl, o.wxAffected],
           getSize: [state.t, hl],
         },
         onHover,
@@ -1264,7 +1305,7 @@ function render() {
         radiusMinPixels: 1.5,
         getFillColor: flightColor,
         updateTriggers: {
-          getFillColor: [state.t, hl],
+          getFillColor: [state.t, hl, o.wxAffected],
           getRadius: [state.t, hl],
         },
         onHover,
@@ -1763,6 +1804,7 @@ bind("ly-flights", "flights");
 bind("ly-refc", "refc");
 bind("ly-retop", "retop");
 bind("ly-conflicts-only", "conflictsOnly");
+bind("ly-wx-affected", "wxAffected");
 bind("ly-trails", "trails");
 bind("ly-arrows", "arrows");
 bind("ly-motion-trails", "motionTrails");

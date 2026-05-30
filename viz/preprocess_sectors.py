@@ -52,6 +52,54 @@ def parse_strip_name(fname):
     return vf.timestamp(), vt.timestamp()
 
 
+def compute_storm_boxes(snap_dir, coarse_deg=0.75, min_cell=2, min_total=4, cap=15):
+    """Storm keep-out boxes per weather strip: cluster heavy (>=40 dBZ) cells onto
+    a coarse lat/lon grid, connected-component them, and emit each cluster's padded
+    bounding box [w, s, e, n]. The frontend reroutes flights around these. Returns
+    a list indexed by strip k (same order as the snapshot's strips)."""
+    files = sorted(glob(os.path.join(snap_dir, "wx", "refc", "*.npz")),
+                   key=lambda p: parse_strip_name(p)[0])
+    out = []
+    for p in files:
+        m = np.load(p)["matrix"]
+        ii, jj = np.where(m >= REFC_HEAVY)
+        grid = {}
+        for i, j in zip(ii.tolist(), jj.tolist()):
+            lat = LAT_MAX - (i + 0.5) * (LAT_MAX - LAT_MIN) / ROWS
+            lon = LON_MIN + (j + 0.5) * (LON_MAX - LON_MIN) / COLS
+            gr = int((LAT_MAX - lat) / coarse_deg)
+            gc = int((lon - LON_MIN) / coarse_deg)
+            grid[(gr, gc)] = grid.get((gr, gc), 0) + 1
+        marked = {c for c, n in grid.items() if n >= min_cell}
+        boxes, seen = [], set()
+        for cell in marked:
+            if cell in seen:
+                continue
+            comp, stack = [], [cell]
+            seen.add(cell)
+            while stack:
+                gr, gc = stack.pop()
+                comp.append((gr, gc))
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nb = (gr + dr, gc + dc)
+                    if nb in marked and nb not in seen:
+                        seen.add(nb)
+                        stack.append(nb)
+            total = sum(grid[c] for c in comp)
+            if total < min_total:
+                continue
+            grs = [c[0] for c in comp]
+            gcs = [c[1] for c in comp]
+            n = LAT_MAX - min(grs) * coarse_deg + 0.2
+            s = LAT_MAX - (max(grs) + 1) * coarse_deg - 0.2
+            w = LON_MIN + min(gcs) * coarse_deg - 0.2
+            e = LON_MIN + (max(gcs) + 1) * coarse_deg + 0.2
+            boxes.append((total, [round(w, 2), round(s, 2), round(e, 2), round(n, 2)]))
+        boxes.sort(key=lambda b: -b[0])
+        out.append([b[1] for b in boxes[:cap]])
+    return out
+
+
 def compute_stormcap(snap_dir, ws, n_steps, bands, trees):
     """Per-sector, per-timestep capacity-reduction factor (0..1) from heavy
     precip, ported from App/build_data.py §4. A sector loses 30–100% capacity

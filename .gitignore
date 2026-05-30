@@ -15,5 +15,10 @@ viz/public/data/
 # Editor / Claude local
 .claude/
 
-./App
-/App
+# Separate Rapid Responder app (218MB; only its storm-cap algorithm was ported
+# into the viz — see preprocess_sectors.py). Excluded from this commit.
+/App/
+
+# Misc local
+*.log
+/tmp/
