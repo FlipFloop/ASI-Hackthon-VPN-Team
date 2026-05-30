@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NAS Live Feed</title>
+    <link href="feed.css" rel="stylesheet" />
+  </head>
+  <body>
+    <header id="feed-header">
+      <h1>NAS Live Feed</h1>
+      <span id="feed-clock">—</span>
+      <span id="feed-status" class="live"
+        ><span class="feed-dot"></span><span id="feed-status-txt">connecting…</span></span
+      >
+    </header>
+
+    <div id="feed-ticker">live market &amp; airspace feed…</div>
+
+    <div id="feed-controls">
+      <div class="feed-filters">
+        <button class="feed-filter active" data-cat="all">All</button>
+        <button class="feed-filter" data-cat="weather">Weather</button>
+        <button class="feed-filter" data-cat="fuel">Fuel</button>
+        <button class="feed-filter" data-cat="airspace">Airspace</button>
+      </div>
+      <div class="feed-actions">
+        <button id="feed-pause">Pause</button>
+        <button id="feed-readall">Mark all read</button>
+      </div>
+    </div>
+
+    <ul id="feed-list"></ul>
+    <div id="feed-empty" hidden>No updates yet…</div>
+
+    <script src="feed.js"></script>
+  </body>
+</html>

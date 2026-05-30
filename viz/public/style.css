@@ -33,6 +33,7 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, san
 .swatch.s-ok { background: #46d39a; }
 .swatch.s-warn { background: #f08c28; }
 .swatch.s-over { background: #ff3232; }
+.swatch.s-storm { background: #c77dff; }
 
 #timebar {
   position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;

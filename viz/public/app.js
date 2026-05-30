@@ -974,9 +974,12 @@ function wxImage(path) {
 
 function render() {
   if (!state.snap) return;
-  const k = currentStrip(); // real-time strip — for flight in-weather status
-  const wxStrip = state.snap.strips[stripAt(dispTime())]; // forecast-shifted raster
-  const strip = wxStrip;
+  // forecast horizon advances the WHOLE view (flights, weather, sectors) to
+  // state.t + horizon, so flights are drawn where they'll be and the ones that
+  // will cross a storm (precomputed cf intervals) light up in advance.
+  const dt = dispTime();
+  const k = stripAt(dt); // forecast-shifted weather strip (= now when horizon 0)
+  const strip = state.snap.strips[k];
   const o = state.opts;
   const bounds = [
     state.grid.lon_min,
@@ -1762,6 +1765,16 @@ bind("ly-conflicts-only", "conflictsOnly");
 bind("ly-trails", "trails");
 bind("ly-arrows", "arrows");
 bind("ly-motion-trails", "motionTrails");
+document.getElementById("ly-stormcap").onchange = (e) => {
+  state.opts.stormCap = e.target.checked;
+  if (state.nfz) applyNFZ(state.nfz); // storm-cap changes before/after over-counts
+  updateMeta();
+  render();
+};
+document.getElementById("horizon").onchange = (e) => {
+  state.opts.horizon = +e.target.value;
+  render();
+};
 document.getElementById("airport-mode").onchange = (e) => {
   state.opts.airports = e.target.value;
   render();
