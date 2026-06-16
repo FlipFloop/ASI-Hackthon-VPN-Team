@@ -1,5 +1,7 @@
 # NAS Traffic & Weather Visualization
 
+**Built by: Nicholas Zhang, Victor Guyard, Pedram Fard**
+
 Interactive map of US flight traffic, weather (radar reflectivity / echo top),
 and weather conflicts, built from the hackathon data bundle.
 
